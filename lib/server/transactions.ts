@@ -16,6 +16,7 @@ export const checkoutSchema = z.object({
   items: z.array(z.object({ productId: z.string().min(1), quantity: z.number().int().min(1).max(20) }).strict()).min(1).max(6),
   currency: z.enum(["USD", "KHR"]).default("USD"),
   method: methodSchema.default("polling"),
+  webhookSignatureMode: z.enum(["signed", "token", "unsigned"]).optional(),
   expectedAmount: z.number().positive().optional(),
 }).strict();
 
@@ -29,8 +30,12 @@ function addEvent(transaction: Transaction, source: TransactionEvent["source"], 
 export async function createTransaction(body: unknown) {
   const input = checkoutSchema.parse(body);
   const config = getConfig();
-  if (input.method === "webhook" && config.mode === "bakong" && !config.webhookSecret) {
-    throw new ApiError(409, "Configure WEBHOOK_SECRET and a callback provider, or choose polling.");
+  const webhookSignatureMode = input.webhookSignatureMode ?? config.webhookSignatureMode;
+  if (input.method === "polling" && config.mode === "bakong" && !config.token) {
+    throw new ApiError(409, "Configure BAKONG_TOKEN for polling, or choose webhook authentication.");
+  }
+  if (webhookSignatureMode !== "unsigned" && !config.webhookSecret) {
+    throw new ApiError(409, "Configure WEBHOOK_SECRET for signed or token webhooks, or choose unsigned.");
   }
   let order: ReturnType<typeof priceOrder>;
   const catalog = getProducts();
@@ -65,6 +70,7 @@ export async function createTransaction(body: unknown) {
     id, orderNumber, ...data.data,
     qrImage: await QRCode.toDataURL(data.data.qr, { width: 400, margin: 4, errorCorrectionLevel: "M" }),
     ...order, currency: input.currency, status: "pending", method: input.method, mode: config.mode,
+    webhookSignatureMode,
     merchantName: config.merchantName, accountId: config.accountId,
     createdAt: now.toISOString(), updatedAt: now.toISOString(), expiresAt: new Date(expiration).toISOString(),
     checkedAt: null, paidAt: null, providerReference: null, events: [],

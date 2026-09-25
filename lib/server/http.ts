@@ -10,17 +10,25 @@ export function json(data: unknown, status = 200) {
   return Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
 }
 
-export async function readJson(request: Request): Promise<unknown> {
+export async function readJsonBody(request: Request) {
   if (!request.headers.get("content-type")?.includes("application/json")) {
     throw new ApiError(415, "Content-Type must be application/json.");
   }
-  const text = await request.text();
-  if (text.length > 16_384) throw new ApiError(413, "Request body is too large.");
+  const body = Buffer.from(await request.arrayBuffer());
+  if (body.byteLength > 16_384) throw new ApiError(413, "Request body is too large.");
+  return body;
+}
+
+export function parseJson(body: Buffer): unknown {
   try {
-    return JSON.parse(text);
+    return JSON.parse(body.toString("utf8"));
   } catch {
     throw new ApiError(400, "Request body must be valid JSON.");
   }
+}
+
+export async function readJson(request: Request): Promise<unknown> {
+  return parseJson(await readJsonBody(request));
 }
 
 export function apiError(error: unknown) {

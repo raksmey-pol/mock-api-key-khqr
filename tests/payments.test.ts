@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,30 +16,43 @@ import { GET as catalog } from "../app/api/v1/products/route";
 import { PATCH as editProduct } from "../app/api/v1/products/[productId]/route";
 import { parseBakongResponse } from "../lib/server/bakong";
 import { database, readTransaction, updateTransaction } from "../lib/server/store";
-import type { Product, Transaction } from "../lib/types";
+import type { Product, Transaction, WebhookSignatureMode } from "../lib/types";
 
 const directory = mkdtempSync(join(process.env.TEST_TMP_DIR ?? tmpdir(), "mekong-tests-"));
 process.env.DATABASE_PATH = join(directory, "payments.sqlite");
 process.env.PAYMENT_MODE = "mock";
 process.env.WEBHOOK_SECRET = "integration-test-secret";
+process.env.WEBHOOK_SIGNATURE_MODE = "signed";
 
 after(() => {
   database().close();
   rmSync(directory, { recursive: true, force: true });
 });
 
-function request(path: string, body: unknown, secret = "integration-test-secret") {
+function signatureHeaders(body: string, secret = "integration-test-secret", timestamp = String(Math.floor(Date.now() / 1000))) {
+  return {
+    "x-webhook-timestamp": timestamp,
+    "x-webhook-signature": `sha256=${createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex")}`,
+  };
+}
+
+function rawRequest(body: string, headers: Record<string, string> = {}, path = "/api/v1/transactions/callback") {
   return new Request(`http://localhost${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-webhook-secret": secret },
-    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", ...headers },
+    body,
   });
 }
 
-async function order(method = "webhook", currency = "USD"): Promise<Transaction> {
+function request(path: string, body: unknown, secret = "integration-test-secret") {
+  const rawBody = JSON.stringify(body);
+  return rawRequest(rawBody, signatureHeaders(rawBody, secret), path);
+}
+
+async function order(method = "webhook", currency = "USD", webhookSignatureMode?: WebhookSignatureMode): Promise<Transaction> {
   const response = await create(request("/api/v1/transactions", {
     items: [{ productId: "mondulkiri-coffee", quantity: 2 }, { productId: "everyday-cup", quantity: 1 }],
-    currency, method,
+    currency, method, webhookSignatureMode,
   }));
   const body = await response.json();
   assert.equal(response.status, 201, JSON.stringify(body));
@@ -53,6 +66,32 @@ function receipt(transaction: Transaction) {
     transactionId: `payment-${transaction.id}`,
   };
 }
+
+function providerBatch(transaction: Transaction, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "0001",
+    transactions: [{
+      fromAccountId: "sender_acc@cmcb",
+      toAccountId: transaction.accountId,
+      assetId: `${transaction.currency.toLowerCase()}#nbc`,
+      amount: transaction.amount,
+      description: "Pay back",
+      createdDateMilli: 1676962944719,
+      hash: "805712c84f0e678d54adfa999835f0c415394732957bdd645e545d0d9969f802",
+      qrCode: transaction.qr,
+      qrType: "CORPORATE",
+      senderName: "Channit Rom",
+      senderAccount: "321456654",
+      senderBank: "CMCBKHPPXX",
+      status: "SUCCESS",
+      ...overrides,
+    }],
+  };
+}
+
+const providerAcknowledgement = {
+  status: { code: 0, errorCode: null, error: null, message: null, warning: null },
+};
 
 function lookup(md5: string, method = "polling") {
   return search(new Request(`http://localhost/api/v1/transactions/search?md5=${md5}&method=${method}`));
@@ -71,6 +110,8 @@ test("health checks configuration/storage and reports both mock update methods",
   assert.equal(body.mode, "mock");
   assert.equal(body.storage, "sqlite");
   assert.deepEqual(body.methods, ["webhook", "polling"]);
+  assert.deepEqual(body.webhookSignatureModes, ["signed", "token", "unsigned"]);
+  assert.equal(body.defaultWebhookSignatureMode, "signed");
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.ok(!JSON.stringify(body).includes(process.env.WEBHOOK_SECRET!));
 });
@@ -114,6 +155,7 @@ test("checkout rejects forged prices, invalid quantities, duplicate/unknown prod
 
 test("callbacks authenticate, verify payment details, settle once, and reject conflicting outcomes", async () => {
   const transaction = await order();
+  assert.equal(transaction.webhookSignatureMode, "signed");
   const payload = receipt(transaction);
   assert.equal((await callback(request("/callback", payload, "wrong-secret"))).status, 401);
   for (const mismatch of [{ amount: 0.01 }, { currency: "KHR" }, { toAccountId: "someone_else@devb" }]) {
@@ -203,38 +245,42 @@ test("Bakong response handling separates pending/failed transfers from provider 
   assert.throws(() => parseBakongResponse("not a response"), /invalid response/);
 });
 
-test("Bakong mode checks the official endpoint, verifies callbacks, and disables mock settlement", async () => {
+test("Bakong mode uses the Open API only for polling and disables mock settlement", async () => {
   process.env.PAYMENT_MODE = "bakong";
   process.env.BAKONG_ACCOUNT_ID = "test_merchant@devb";
   process.env.BAKONG_TOKEN = "test-server-token";
   process.env.BAKONG_API_URL = "https://bakong.example.test";
   const originalFetch = globalThis.fetch;
   try {
-    const transaction = await order();
-    assert.equal((await simulate(request("/simulate", { md5: transaction.md5, status: "paid", method: "webhook" }))).status, 404);
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; throw new Error("Webhook must not call Bakong Open API."); };
+    const webhookTransaction = await order("webhook", "USD", "signed");
+    assert.equal((await simulate(request("/simulate", { md5: webhookTransaction.md5, status: "paid", method: "webhook" }))).status, 404);
+    assert.equal((await callback(request("/callback", receipt(webhookTransaction)))).status, 200);
+    assert.equal(calls, 0);
+    assert.equal(readTransaction(webhookTransaction.md5)?.status, "paid");
+
+    const pollingTransaction = await order("polling");
     globalThis.fetch = async (url, options) => {
+      calls++;
       assert.equal(url, "https://bakong.example.test/v1/check_transaction_by_md5");
       assert.equal(options?.method, "POST");
       assert.equal(new Headers(options?.headers).get("authorization"), "Bearer test-server-token");
-      assert.deepEqual(JSON.parse(options!.body as string), { md5: transaction.md5 });
-      return Response.json({ responseCode: 1, responseMessage: "Transaction could not be found.", data: null });
+      assert.deepEqual(JSON.parse(options!.body as string), { md5: pollingTransaction.md5 });
+      return Response.json({ responseCode: 0, data: {
+        hash: "b".repeat(64), toAccountId: pollingTransaction.accountId,
+        amount: pollingTransaction.amount, currency: pollingTransaction.currency,
+      } });
     };
-    assert.equal((await callback(request("/callback", receipt(transaction)))).status, 409);
-    globalThis.fetch = async () => Response.json({ responseCode: 0, data: {
-      hash: receipt(transaction).transactionId, toAccountId: transaction.accountId,
-      amount: transaction.amount + 1, currency: transaction.currency,
-    } });
-    assert.equal((await callback(request("/callback", receipt(transaction)))).status, 409);
-    globalThis.fetch = async () => Response.json({ responseCode: 0, data: {
-      hash: receipt(transaction).transactionId, toAccountId: transaction.accountId,
-      amount: transaction.amount, currency: transaction.currency,
-    } });
-    assert.equal((await callback(request("/callback", receipt(transaction)))).status, 200);
-    assert.equal(readTransaction(transaction.md5)?.status, "paid");
-    const another = await order("polling");
+    const checked = await lookup(pollingTransaction.md5);
+    assert.equal(checked.status, 200);
+    assert.equal((await checked.json()).data.status, "paid");
+    assert.equal(calls, 1);
+
+    const unauthorized = await order("polling");
     globalThis.fetch = async () => new Response("Unauthorized", { status: 401 });
-    assert.equal((await lookup(another.md5)).status, 502);
-    assert.equal(readTransaction(another.md5)?.status, "pending");
+    assert.equal((await lookup(unauthorized.md5)).status, 502);
+    assert.equal(readTransaction(unauthorized.md5)?.status, "pending");
   } finally {
     globalThis.fetch = originalFetch;
     process.env.PAYMENT_MODE = "mock";
@@ -313,5 +359,320 @@ test("checkout detects a stale cart total after a price edit and accepts the ref
     assert.equal((await refreshed.json()).data.amount, 0.01);
   } finally {
     await patchPrice(original.id, { currency: "USD", price: original.price.USD });
+  }
+});
+
+test("signed callbacks verify exact bytes and reject missing, modified, stale, and future signatures", async () => {
+  const transaction = await order("webhook", "USD", "signed");
+  const payload = { ...receipt(transaction), transactionId: "បង់ប្រាក់-payment-123" };
+  const body = JSON.stringify(payload, null, 2) + "\n";
+  const headers = signatureHeaders(body);
+  const now = Math.floor(Date.now() / 1000);
+  const invalidRequests = [
+    rawRequest(body),
+    rawRequest(body, { "x-webhook-secret": "integration-test-secret" }),
+    rawRequest(body, { "x-webhook-timestamp": headers["x-webhook-timestamp"] }),
+    rawRequest(body, { "x-webhook-signature": headers["x-webhook-signature"] }),
+    rawRequest(body, { ...headers, "x-webhook-signature": "sha256=invalid" }),
+    rawRequest(body, { ...headers, "x-webhook-timestamp": "not-a-timestamp" }),
+    rawRequest(body, signatureHeaders(body, "wrong-key")),
+    rawRequest(body, signatureHeaders(body, "integration-test-secret", String(now - 301))),
+    rawRequest(body, signatureHeaders(body, "integration-test-secret", String(now + 600))),
+    rawRequest(body, { ...headers, "x-webhook-timestamp": String(now - 1) }),
+    rawRequest(JSON.stringify(payload), headers),
+    rawRequest(JSON.stringify({ ...payload, amount: payload.amount + 1 }), headers),
+    rawRequest(body, {}, "/api/v1/transactions/callback?webhookSignatureMode=unsigned"),
+    rawRequest(JSON.stringify({ ...payload, webhookSignatureMode: "unsigned" })),
+  ];
+  for (const invalid of invalidRequests) {
+    assert.equal((await callback(invalid)).status, 401);
+    assert.equal(readTransaction(transaction.md5)?.status, "pending");
+  }
+  assert.equal((await callback(rawRequest(body, headers))).status, 200);
+  const settled = readTransaction(transaction.md5)!;
+  assert.equal(settled.status, "paid");
+  assert.equal(settled.providerReference, payload.transactionId);
+  assert.equal((await callback(rawRequest(body, headers))).status, 200);
+  assert.deepEqual(readTransaction(transaction.md5), settled);
+});
+
+test("signed mode stays bound to the checkout when the default changes or the signing key is removed", async () => {
+  const transaction = await order("webhook", "USD", "signed");
+  const payload = receipt(transaction);
+  try {
+    process.env.WEBHOOK_SIGNATURE_MODE = "unsigned";
+    assert.equal((await callback(rawRequest(JSON.stringify(payload)))).status, 401);
+    process.env.WEBHOOK_SECRET = "";
+    assert.equal((await callback(rawRequest(JSON.stringify(payload)))).status, 503);
+    assert.equal((await simulate(request("/simulate", { md5: transaction.md5, status: "paid", method: "webhook" }))).status, 503);
+    assert.equal(readTransaction(transaction.md5)?.status, "pending");
+  } finally {
+    process.env.WEBHOOK_SIGNATURE_MODE = "signed";
+    process.env.WEBHOOK_SECRET = "integration-test-secret";
+  }
+  assert.equal((await callback(request("/callback", payload))).status, 200);
+});
+
+test("unsigned callbacks accept plain JSON even with a configured signing key and retain payment validation", async () => {
+  const transaction = await order("webhook", "USD", "unsigned");
+  assert.equal(transaction.webhookSignatureMode, "unsigned");
+  assert.equal(readTransaction(transaction.md5)?.webhookSignatureMode, "unsigned");
+  const payload = receipt(transaction);
+  assert.equal((await callback(rawRequest(JSON.stringify({ ...payload, amount: 0.01 })))).status, 409);
+  assert.equal(readTransaction(transaction.md5)?.status, "pending");
+  assert.equal((await callback(rawRequest(JSON.stringify(payload)))).status, 200);
+  const settled = readTransaction(transaction.md5)!;
+  assert.equal(settled.status, "paid");
+  assert.equal((await callback(rawRequest(JSON.stringify(payload)))).status, 200);
+  assert.deepEqual(readTransaction(transaction.md5), settled);
+});
+
+test("signed, token, and unsigned simulator callbacks settle with their saved mode", async () => {
+  for (const mode of ["signed", "token", "unsigned"] as const) {
+    for (const status of ["paid", "failed"] as const) {
+      const transaction = await order("webhook", "USD", mode);
+      const response = await simulate(request("/simulate", { md5: transaction.md5, status, method: "webhook" }));
+      assert.equal(response.status, 200);
+      const data = (await response.json()).data as Transaction;
+      assert.equal(data.status, status);
+      assert.equal(data.webhookSignatureMode, mode);
+      assert.equal(data.events.at(-1)?.source, "webhook");
+    }
+  }
+});
+
+test("unsigned mode works without a secret and authenticated modes require a configured key", async () => {
+  try {
+    process.env.WEBHOOK_SECRET = "";
+    process.env.WEBHOOK_SIGNATURE_MODE = "";
+    const response = await health();
+    assert.equal(response.status, 200);
+    const config = await response.json();
+    assert.deepEqual(config.webhookSignatureModes, ["unsigned"]);
+    assert.equal(config.defaultWebhookSignatureMode, "unsigned");
+    const transaction = await order();
+    assert.equal(transaction.webhookSignatureMode, "unsigned");
+    assert.equal((await callback(rawRequest(JSON.stringify(receipt(transaction))))).status, 200);
+    for (const mode of ["signed", "token"] as const) {
+      const authenticated = await create(request("/transactions", { items: [{ productId: "market-tote", quantity: 1 }], method: "webhook", webhookSignatureMode: mode }));
+      assert.equal(authenticated.status, 409);
+    }
+    process.env.WEBHOOK_SIGNATURE_MODE = "token";
+    assert.equal((await health()).status, 503);
+  } finally {
+    process.env.WEBHOOK_SECRET = "integration-test-secret";
+    process.env.WEBHOOK_SIGNATURE_MODE = "signed";
+  }
+});
+
+test("legacy transactions retain the shared-secret callback contract", async () => {
+  const transaction = await order();
+  updateTransaction(transaction.md5, (current) => {
+    delete current.webhookSignatureMode;
+    return current;
+  });
+  const body = JSON.stringify(receipt(transaction));
+  assert.equal((await callback(rawRequest(body))).status, 401);
+  assert.equal((await callback(rawRequest(body, { "x-webhook-secret": "wrong" }))).status, 401);
+  assert.equal((await callback(rawRequest(body, { "x-webhook-secret": "integration-test-secret" }))).status, 200);
+});
+
+test("Bakong unsigned webhooks settle without BAKONG_TOKEN or Open API verification", async () => {
+  const originalFetch = globalThis.fetch;
+  process.env.PAYMENT_MODE = "bakong";
+  process.env.BAKONG_ACCOUNT_ID = "test_merchant@devb";
+  process.env.BAKONG_TOKEN = "";
+  process.env.WEBHOOK_SIGNATURE_MODE = "unsigned";
+  process.env.WEBHOOK_SECRET = "";
+  try {
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; throw new Error("Webhook must not call Bakong Open API."); };
+    const transaction = await order("webhook", "USD", "unsigned");
+    const response = await callback(rawRequest(JSON.stringify(receipt(transaction))));
+    assert.equal(response.status, 200);
+    assert.equal(calls, 0);
+    assert.equal(readTransaction(transaction.md5)?.status, "paid");
+    const healthBody = await (await health()).json();
+    assert.deepEqual(healthBody.methods, ["webhook"]);
+    const pollingCheckout = await create(request("/transactions", { items: [{ productId: "market-tote", quantity: 1 }], method: "polling" }));
+    assert.equal(pollingCheckout.status, 409);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.PAYMENT_MODE = "mock";
+    process.env.BAKONG_TOKEN = "integration-test-token";
+    process.env.WEBHOOK_SIGNATURE_MODE = "signed";
+    process.env.WEBHOOK_SECRET = "integration-test-secret";
+  }
+});
+
+test("webhook logging records the exact request and response bodies", async () => {
+  const transaction = await order("webhook", "KHR", "unsigned");
+  const body = JSON.stringify(providerBatch(transaction));
+  const originalInfo = console.info;
+  const entries: string[] = [];
+  console.info = (...values: unknown[]) => { entries.push(values.map(String).join(" ")); };
+  let response: Response;
+  try {
+    response = await callback(rawRequest(body));
+  } finally {
+    console.info = originalInfo;
+  }
+  assert.equal(response.status, 200);
+  const requestEntry = entries.find((entry) => entry.startsWith("KHQR_WEBHOOK_REQUEST "));
+  const responseEntry = entries.find((entry) => entry.startsWith("KHQR_WEBHOOK_RESPONSE "));
+  assert.ok(requestEntry);
+  assert.ok(responseEntry);
+  const requestLog = JSON.parse(requestEntry.slice("KHQR_WEBHOOK_REQUEST ".length));
+  const responseLog = JSON.parse(responseEntry.slice("KHQR_WEBHOOK_RESPONSE ".length));
+  assert.equal(requestLog.body, body);
+  assert.deepEqual(requestLog.authentication, { signatureProvided: false, timestampProvided: false, tokenProvided: false });
+  assert.equal(responseLog.status, 200);
+  assert.equal(responseLog.body, JSON.stringify(providerAcknowledgement));
+  assert.equal(typeof responseLog.durationMs, "number");
+});
+
+test("provider batch callbacks accept nullable remittance metadata", async () => {
+  const transaction = await order("webhook", "KHR", "unsigned");
+  const payload = {
+    requestId: "a818a3d5-3a92-46e4-9417-aaf695282baf",
+    transactions: [{
+      fromAccountId: "raksmey_pol@bkrt",
+      toAccountId: transaction.accountId,
+      assetId: "khr#nbc",
+      amount: transaction.amount,
+      description: transaction.orderNumber,
+      createdDateMilli: 1790328965000,
+      hash: "61dd1ea1d744184e75d74564aa5aac02a63e0dd2c0ed6ade076736d05648e5ed",
+      qrCode: transaction.qr,
+      qrCodeType: "REMITTANCE",
+      senderName: null,
+      senderAccount: null,
+      senderBank: "BKRTKHPPXXX",
+      status: "SUCCESS",
+    }],
+  };
+  const response = await callback(rawRequest(JSON.stringify(payload)));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), providerAcknowledgement);
+  const settled = readTransaction(transaction.md5)!;
+  assert.equal(settled.status, "paid");
+  assert.equal(settled.providerReference, payload.transactions[0].hash);
+});
+
+test("provider batch callbacks acknowledge the exact contract, ignore unrelated transfers, and settle matching orders", async () => {
+  const transaction = await order("webhook", "KHR", "unsigned");
+  const payload = {
+    requestId: "0001",
+    transactions: [
+      providerBatch(transaction, { hash: "a".repeat(64), qrCode: "000201010212unrelated", amount: 5000 }).transactions[0],
+      providerBatch(transaction).transactions[0],
+    ],
+  };
+  const body = JSON.stringify(payload);
+  const response = await callback(rawRequest(body));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), providerAcknowledgement);
+  const settled = readTransaction(transaction.md5)!;
+  assert.equal(settled.status, "paid");
+  assert.equal(settled.providerReference, payload.transactions[1].hash);
+  assert.equal(settled.events.at(-1)?.source, "webhook");
+  const duplicate = await callback(rawRequest(body));
+  assert.equal(duplicate.status, 200);
+  assert.deepEqual(await duplicate.json(), providerAcknowledgement);
+  assert.deepEqual(readTransaction(transaction.md5), settled);
+});
+
+test("provider batch callbacks map failure and pending states while acknowledging them", async () => {
+  for (const [providerStatus, expectedStatus] of [
+    ["FAILED", "failed"],
+    ["DECLINED", "failed"],
+    ["PENDING", "pending"],
+    ["PROCESSING", "pending"],
+  ] as const) {
+    const transaction = await order("webhook", "USD", "unsigned");
+    const response = await callback(rawRequest(JSON.stringify(providerBatch(transaction, { status: providerStatus }))));
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), providerAcknowledgement);
+    assert.equal(readTransaction(transaction.md5)?.status, expectedStatus);
+  }
+});
+
+test("provider batch callbacks validate matching entries and reject malformed or unsupported batches", async () => {
+  const mismatches = [
+    [{ amount: 0.01 }, 409],
+    [{ toAccountId: "someone_else@devb" }, 409],
+    [{ assetId: "eur#nbc" }, 400],
+    [{ status: "UNKNOWN" }, 400],
+  ] as const;
+  for (const [mismatch, expectedStatus] of mismatches) {
+    const transaction = await order("webhook", "USD", "unsigned");
+    const response = await callback(rawRequest(JSON.stringify(providerBatch(transaction, mismatch))));
+    assert.equal(response.status, expectedStatus, JSON.stringify(mismatch));
+    assert.equal(readTransaction(transaction.md5)?.status, "pending");
+  }
+  for (const payload of [
+    { requestId: "0001", transactions: [] },
+    { requestId: "0001", transactions: [{ ...providerBatch(await order()).transactions[0], hash: "invalid" }] },
+    { requestId: "0001", transactions: [{ ...providerBatch(await order()).transactions[0], qrCode: undefined }] },
+  ]) assert.equal((await callback(rawRequest(JSON.stringify(payload)))).status, 400);
+});
+
+test("token provider batch callbacks require the shared x-webhook-secret header", async () => {
+  const transaction = await order("webhook", "USD", "token");
+  const body = JSON.stringify(providerBatch(transaction));
+  assert.equal((await callback(rawRequest(body))).status, 401);
+  assert.equal((await callback(rawRequest(body, { "x-webhook-secret": "wrong" }))).status, 401);
+  assert.equal(readTransaction(transaction.md5)?.status, "pending");
+  const response = await callback(rawRequest(body, { "x-webhook-secret": "integration-test-secret" }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), providerAcknowledgement);
+  assert.equal(readTransaction(transaction.md5)?.status, "paid");
+});
+
+test("signed provider batch callbacks require a valid signature over the full batch body", async () => {
+  const transaction = await order("webhook", "USD", "signed");
+  const body = JSON.stringify(providerBatch(transaction));
+  const unsigned = await callback(rawRequest(body));
+  assert.equal(unsigned.status, 401);
+  assert.equal(readTransaction(transaction.md5)?.status, "pending");
+  const signed = await callback(rawRequest(body, signatureHeaders(body)));
+  assert.equal(signed.status, 200);
+  assert.deepEqual(await signed.json(), providerAcknowledgement);
+  assert.equal(readTransaction(transaction.md5)?.status, "paid");
+});
+
+test("Bakong provider batch webhooks settle from webhook auth without Open API calls", async () => {
+  const originalFetch = globalThis.fetch;
+  process.env.PAYMENT_MODE = "bakong";
+  process.env.BAKONG_ACCOUNT_ID = "test_merchant@devb";
+  process.env.BAKONG_TOKEN = "";
+  process.env.BAKONG_API_URL = "https://bakong.example.test";
+  process.env.WEBHOOK_SIGNATURE_MODE = "token";
+  process.env.WEBHOOK_SECRET = "integration-test-secret";
+  try {
+    const transaction = await order("webhook", "KHR", "token");
+    const payload = providerBatch(transaction, { hash: "b".repeat(64) });
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; throw new Error("Webhook must not call Bakong Open API."); };
+    const response = await callback(rawRequest(JSON.stringify(payload), { "x-webhook-secret": "integration-test-secret" }));
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), providerAcknowledgement);
+    assert.equal(calls, 0);
+    assert.equal(readTransaction(transaction.md5)?.status, "paid");
+
+    const mismatch = await order("webhook", "KHR", "token");
+    const rejected = await callback(rawRequest(
+      JSON.stringify(providerBatch(mismatch, { hash: "d".repeat(64), amount: mismatch.amount + 1 })),
+      { "x-webhook-secret": "integration-test-secret" },
+    ));
+    assert.equal(rejected.status, 409);
+    assert.equal(calls, 0);
+    assert.equal(readTransaction(mismatch.md5)?.status, "pending");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.PAYMENT_MODE = "mock";
+    process.env.BAKONG_TOKEN = "integration-test-token";
+    process.env.WEBHOOK_SIGNATURE_MODE = "signed";
+    process.env.WEBHOOK_SECRET = "integration-test-secret";
   }
 });

@@ -14,7 +14,7 @@ pnpm dev
 Open **http://localhost:3000**. No credentials are required in the default `mock` environment.
 
 1. Add products to your bag and select USD or KHR.
-2. Choose **Polling** or **Webhook** under **Your integration**.
+2. Choose **Polling** or **Webhook** under **Your integration**. For webhooks, choose **Signed**, **Token**, or **Unsigned** before creating checkout.
 3. Select **Checkout with KHQR** to generate the QR and its MD5.
 4. Use **Simulate successful payment** or **Simulate a failed payment** in checkout.
 5. Open **Transactions** to view orders, reopen a checkout, or search an MD5.
@@ -36,13 +36,33 @@ Click **Edit price** on any product, choose **USD** or **KHR**, enter the new am
 | Method | How it works |
 | --- | --- |
 | **Polling** | The browser calls this app's search endpoint every 3 seconds. In Bakong mode, the server sends `POST /v1/check_transaction_by_md5` with a server-side Bearer token. In mock mode, it reads the simulated provider result. |
-| **Webhook** | A payment gateway posts a status to `/api/v1/transactions/callback`. Checkout receives local status changes over a server-sent event stream, without repeatedly querying Bakong. In Bakong mode, a successful callback triggers an independent Bakong verification. |
+| **Webhook** | A payment gateway posts a status to `/api/v1/transactions/callback`. Checkout receives local status changes over a server-sent event stream. Webhook mode uses only the selected webhook authentication mode and does not call Bakong's Open API. |
 
-**Bakong's linked public integration guide specifies MD5 polling, not a generic webhook subscription.** This app's callback body and `x-webhook-secret` header are an application-specific contract. For actual webhook delivery, configure a compatible gateway/adapter to call this app's publicly reachable callback URL. There is no automatic webhook registration with NBC. Deep-link return URLs are not payment webhooks.
+**Bakong's linked public integration guide specifies MD5 polling, not a generic webhook subscription.** This app accepts both the provider's `requestId` + `transactions[]` batch envelope and a compact single-transaction callback. For actual webhook delivery, configure the provider to call this app's publicly reachable callback URL. There is no automatic webhook registration with NBC. Deep-link return URLs are not payment webhooks.
 
 You can switch the active checkout listener between the two methods. **Check MD5 now** explicitly queries the provider regardless of the listener selection. The method stored with an order records the choice at creation.
 
 In mock polling mode, the simulator records a provider outcome; only a later MD5 poll settles the order. In mock webhook mode, the simulator invokes the exact callback handler, including its validation and authentication. It does not send an external network request to itself.
+
+### Webhook authentication modes
+
+Under **Your integration → Webhook**, select one of three modes:
+
+| Mode | Callback requirements |
+| --- | --- |
+| **Signed** | HMAC-SHA256 signature over the exact body bytes plus a timestamp. Requires `WEBHOOK_SECRET` on the server. |
+| **Token** | Send `WEBHOOK_SECRET` in the `x-webhook-secret` header. The body is not signed. |
+| **Unsigned** | Plain JSON callback with `Content-Type: application/json`. No authentication header is required. |
+
+The selected `webhookSignatureMode` is stored with each transaction. The receiver enforces that saved policy for all callbacks to the order, including after switching its UI listener between polling and webhook. A callback cannot change the saved mode through a header, query parameter, or body field. Your browser remembers the selection for new checkouts.
+
+The simulator follows the saved mode: it signs signed callbacks, adds the token header for token callbacks, and sends plain JSON for unsigned callbacks. The key stays on the server. Every mode still validates the MD5, amount, currency, recipient, and final status.
+
+Webhook settlement does **not** call Bakong's Open API and does not require `BAKONG_TOKEN`. `BAKONG_TOKEN` is used only when you select **Polling** in Bakong mode. If it is absent or rejected, webhook checkout remains available while polling is disabled or returns a configuration error.
+
+To enable **Signed** or **Token**, set `WEBHOOK_SECRET` in `.env.local` and restart the server. The default for new orders is signed when a key is configured, otherwise unsigned. `WEBHOOK_SIGNATURE_MODE` accepts `signed`, `token`, or `unsigned`; the UI and create-order API can override it per order. Health responses list available webhook modes without exposing the key.
+
+Existing orders created before this feature retain their original `x-webhook-secret` authentication when a secret is configured. Newly created orders always include `webhookSignatureMode`.
 
 ## Environment configuration
 
@@ -56,20 +76,21 @@ Copy `.env.example` to `.env.local` and restart the server after changing config
 | `KHQR_MERCHANT_CITY` | `Phnom Penh`; ASCII, maximum 15 characters |
 | `KHQR_EXPIRATION_MINUTES` | `5`; integer from 1 to 10, following the integration guide's maximum payment window |
 | `BAKONG_ACCOUNT_ID` | Receiving account, required in Bakong mode |
-| `BAKONG_TOKEN` | Bakong Open API access token, required in Bakong mode |
+| `BAKONG_TOKEN` | Bakong Open API access token; required only for Bakong MD5 polling, not webhook mode |
 | `BAKONG_API_URL` | `https://api-bakong.nbc.gov.kh`; base URL **without** `/v1` |
 | `KHQR_MERCHANT_ID` | Optional; switches SDK generation from individual to merchant KHQR |
 | `KHQR_ACQUIRING_BANK` | Required when a merchant ID is supplied |
-| `WEBHOOK_SECRET` | Shared callback secret; optional in mock mode, required to enable webhook mode with Bakong |
+| `WEBHOOK_SECRET` | HMAC-SHA256 signing key; required for signed callbacks, optional for unsigned callbacks |
+| `WEBHOOK_SIGNATURE_MODE` | Default for new orders: `signed`, `token`, or `unsigned`. If empty, defaults to signed when a key is set, otherwise unsigned. Signed/token require a key. |
 
 ### Connect Bakong
 
-1. Register for an access token through the [Bakong Open API portal](https://api-bakong.nbc.gov.kh/) or the [SIT portal](https://sit-api-bakong.nbc.org.kh/).
-2. Set `PAYMENT_MODE=bakong`, `BAKONG_ACCOUNT_ID`, `BAKONG_TOKEN`, and the appropriate environment's `BAKONG_API_URL`.
-3. Choose **Polling** for the directly documented Bakong integration.
-4. For a gateway-based webhook integration, set `WEBHOOK_SECRET` and register `https://your-host/api/v1/transactions/callback` with that gateway. Its adapter must translate the payload to the contract below; `transactionId` must be Bakong's transaction `hash`.
+1. For Polling, register for an access token through the [Bakong Open API portal](https://api-bakong.nbc.gov.kh/) or the [SIT portal](https://sit-api-bakong.nbc.org.kh/).
+2. Set `PAYMENT_MODE=bakong` and `BAKONG_ACCOUNT_ID`. Add `BAKONG_TOKEN` and the matching `BAKONG_API_URL` only when using Polling.
+3. Choose **Polling** for the directly documented Bakong MD5 API.
+4. For webhook delivery, register `https://your-host/api/v1/transactions/callback` and choose Signed, Token, or Unsigned. Signed and Token use `WEBHOOK_SECRET`; webhook mode does not require a Bakong API token.
 
-Tokens remain on the server. In Bakong mode the simulator returns 404. The health check tests local configuration and SQLite access; it does not claim to test token validity or Bakong connectivity.
+Credentials remain on the server. In Bakong mode the simulator returns 404. The health check tests local configuration and SQLite access; it does not claim to validate a Bakong token.
 
 ## API
 
@@ -82,7 +103,7 @@ All responses are JSON except the SSE endpoint. Transaction responses use `{ "da
 | `PATCH` | `/api/v1/products/<productId>` | Save a product's price for the specified currency |
 | `POST` | `/api/v1/transactions` | Create an order and KHQR; returns 201 |
 | `GET` | `/api/v1/transactions` | Most recent 30 orders in the current environment |
-| `POST` | `/api/v1/transactions/callback` | Receive a payment outcome |
+| `POST` | `/api/v1/transactions/callback` | Receive provider batch or compact payment callbacks |
 | `GET` | `/api/v1/transactions/search?md5=<md5>&method=polling` | Check the provider and return the transaction (`polling` is the default) |
 | `GET` | `/api/v1/transactions/search?md5=<md5>&method=webhook` | Read locally recorded callback status without contacting Bakong |
 | `GET` | `/api/v1/transactions/events?md5=<md5>` | SSE events named `transaction` containing the transaction object |
@@ -103,23 +124,76 @@ Returns `{ "data": { ...product, "price": { "USD": 0.25, "KHR": 34000 } } }` for
 ```bash
 curl -X POST http://localhost:3000/api/v1/transactions \
   -H 'Content-Type: application/json' \
-  -d '{"items":[{"productId":"mondulkiri-coffee","quantity":1}],"currency":"USD","method":"webhook"}'
+  -d '{"items":[{"productId":"mondulkiri-coffee","quantity":1}],"currency":"USD","method":"webhook","webhookSignatureMode":"unsigned"}'
 ```
 
 Other product IDs: `everyday-cup`, `market-tote`, `daily-notes`, `quiet-candle`, `daily-bottle`. Quantities must be integers from 1–20; each product can appear once. Currencies are `USD` and `KHR`.
 
-The response contains `orderNumber`, `md5`, the original `qr` string, a PNG `qrImage` data URL, server-calculated `amount`, `currency`, `expiresAt`, `status`, and an activity log. Every order has a unique reference embedded in its dynamic KHQR.
+The response contains `orderNumber`, `md5`, the original `qr` string, a PNG `qrImage` data URL, server-calculated `amount`, `currency`, `expiresAt`, `status`, `webhookSignatureMode`, and an activity log. Every order has a unique reference embedded in its dynamic KHQR. Use `"webhookSignatureMode":"signed"`, `"token"`, or `"unsigned"`; omitting it uses the server default. Signed/token modes without `WEBHOOK_SECRET` return 409.
 
 Optionally send `expectedAmount` with the displayed cart total. The server returns 409 if it differs from the current catalog total. The storefront uses this check and refreshes the catalog on an unsuccessful checkout.
 
-### Receive a successful callback
+### Receive the provider batch callback
 
-Replace `MD5_FROM_CHECKOUT` with the returned 32-character MD5 and use the checkout's returned amount, currency, and account. This example matches one coffee order at its original mock price.
+The callback endpoint accepts the provider's batch envelope directly:
+
+```json
+{
+  "requestId": "0001",
+  "transactions": [
+    {
+      "fromAccountId": "sender_acc@cmcb",
+      "toAccountId": "receiver_acc@devb",
+      "assetId": "khr#nbc",
+      "amount": 13700,
+      "description": "Pay back",
+      "createdDateMilli": 1676962944719,
+      "hash": "805712c84f0e678d54adfa999835f0c415394732957bdd645e545d0d9969f802",
+      "qrCode": "<complete KHQR string from checkout>",
+      "qrType": "CORPORATE",
+      "senderName": "Channit Rom",
+      "senderAccount": "321456654",
+      "senderBank": "CMCBKHPPXX",
+      "status": "SUCCESS"
+    }
+  ]
+}
+```
+
+For every entry, the server calculates `MD5(qrCode)` and finds the matching local order. The complete, untruncated `qrCode` is required. Provider metadata such as `description`, `qrType`/`qrCodeType`, `senderName`, `senderAccount`, and `senderBank` may be omitted or `null`. `SUCCESS` marks a matching order paid, `FAILED`/`DECLINED`/`REJECTED`/`CANCELLED` mark it failed, and `PENDING`/`PROCESSING` leave it pending. `khr#nbc` maps to KHR and `usd#nbc` maps to USD. Unrelated transfers in the same batch are acknowledged without changing any order.
+
+A valid batch receives HTTP 200 with exactly:
+
+```json
+{
+  "status": {
+    "code": 0,
+    "errorCode": null,
+    "error": null,
+    "message": null,
+    "warning": null
+  }
+}
+```
+
+In Bakong mode, webhook settlement uses only the order's saved Signed, Token, or Unsigned policy. It does not call `check_transaction_by_md5` and does not require `BAKONG_TOKEN`. The server still validates the amount, currency, and recipient against the order.
+
+#### Callback logging
+
+Every callback writes two structured entries to the terminal running Next.js:
+
+- `KHQR_WEBHOOK_REQUEST` includes the timestamp, method, URL, content type/length, whether signature/timestamp/token headers were present, and the exact request body.
+- `KHQR_WEBHOOK_RESPONSE` includes the processing duration, HTTP status/status text, content type, and exact response body.
+- If reading the request fails before a body is available, `KHQR_WEBHOOK_REQUEST_ERROR` records the request metadata and error. The normal response log is still written.
+- Signature and secret values are never logged. The body is logged as required for debugging and can contain account identifiers, amounts, and complete KHQR payloads; protect or redact terminal logs before sharing them.
+
+### Receive an unsigned compact callback
+
+For an order created with `"webhookSignatureMode":"unsigned"`, replace `MD5_FROM_CHECKOUT` with the returned 32-character MD5 and use the checkout's returned amount, currency, and account. This example matches one coffee order at its original mock price.
 
 ```bash
 curl -X POST http://localhost:3000/api/v1/transactions/callback \
   -H 'Content-Type: application/json' \
-  -H 'x-webhook-secret: YOUR_CONFIGURED_SECRET' \
   -d '{
     "md5":"MD5_FROM_CHECKOUT",
     "status":"paid",
@@ -130,9 +204,65 @@ curl -X POST http://localhost:3000/api/v1/transactions/callback \
   }'
 ```
 
-Omit the secret header only when `WEBHOOK_SECRET` is empty in mock mode. For a failed payment the body is `{ "md5": "MD5_FROM_CHECKOUT", "status": "failed" }`.
+For a failed payment the body is `{ "md5": "MD5_FROM_CHECKOUT", "status": "failed" }`.
 
-Callbacks validate the MD5, amount, currency, and recipient. Matching duplicate deliveries return 200 without adding duplicate events. Conflicting outcomes return 409 and cannot overwrite a settled payment. Malformed input returns 400, invalid credentials 401, unsupported content type 415, and an unknown MD5 404. A successful Bakong-mode callback is checked against Bakong before settlement; a not-yet-confirmed transfer returns 409 so the gateway can retry.
+### Receive a token-authenticated callback
+
+Create an order with `"webhookSignatureMode":"token"`, then send `WEBHOOK_SECRET` in this header:
+
+```text
+x-webhook-secret: YOUR_WEBHOOK_SECRET
+```
+
+Use the same compact or provider-batch body. The JSON body is not signed. Missing or incorrect tokens return 401; if the server has no `WEBHOOK_SECRET`, token mode returns 503. The simulator supplies the correct token automatically for token-mode mock orders.
+
+### Receive a signed callback
+
+Create an order with `"webhookSignatureMode":"signed"`, then generate these headers on the sending server:
+
+```text
+x-webhook-timestamp: <Unix timestamp in seconds>
+x-webhook-signature: sha256=<64-character hexadecimal HMAC>
+```
+
+The signature is `HMAC-SHA256(WEBHOOK_SECRET, timestamp + "." + raw_request_body)`. The timestamp must be within **±300 seconds** of server time. The exact UTF-8 JSON bytes sent over HTTP must match the signed bytes, including whitespace and trailing newlines.
+
+Example sender using Node.js (use the amount, currency, account, and MD5 from your order):
+
+```js
+import { createHmac } from "node:crypto";
+
+const secret = process.env.WEBHOOK_SECRET;
+if (!secret) throw new Error("Set the same WEBHOOK_SECRET as the receiving server.");
+
+const body = JSON.stringify({
+  md5: "MD5_FROM_CHECKOUT",
+  status: "paid",
+  amount: 8.5,
+  currency: "USD",
+  toAccountId: "mock_store@devb",
+  transactionId: "mock-payment-001",
+});
+const timestamp = String(Math.floor(Date.now() / 1000));
+const signature = createHmac("sha256", secret)
+  .update(`${timestamp}.${body}`)
+  .digest("hex");
+
+const response = await fetch("http://localhost:3000/api/v1/transactions/callback", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "x-webhook-timestamp": timestamp,
+    "x-webhook-signature": `sha256=${signature}`,
+  },
+  body,
+});
+console.log(response.status, await response.json());
+```
+
+Missing, malformed, incorrect, or out-of-window signatures return 401. The receiver compares HMACs in constant time. Sign retries with a fresh timestamp; duplicate confirmed outcomes remain idempotent. If the signing key is removed, signed orders return 503 instead of accepting an unsigned callback.
+
+Provider batches and compact callbacks validate the MD5, amount, currency, and recipient. Matching duplicate deliveries return 200 without adding duplicate events. Conflicting outcomes return 409 and cannot overwrite a settled payment. Malformed input returns 400, unsupported content type 415, invalid/missing authentication 401, and an unknown compact MD5 404.
 
 ### Poll by MD5
 
@@ -140,7 +270,7 @@ Callbacks validate the MD5, amount, currency, and recipient. Matching duplicate 
 curl 'http://localhost:3000/api/v1/transactions/search?md5=MD5_FROM_CHECKOUT&method=polling'
 ```
 
-Statuses: `pending`, `paid`, `failed`, `expired`. Bakong's “transaction could not be found” response means `pending` until expiry. Provider authentication, network, and malformed-response errors are surfaced as 502 instead of being reported as a failed payment. Calls are coalesced in flight and successful checks are throttled to one per 3 seconds per transaction in a server process.
+Statuses: `pending`, `paid`, `failed`, `expired`. Bakong mode Polling requires `BAKONG_TOKEN`. Bakong's “transaction could not be found” response means `pending` until expiry. Provider authentication, network, and malformed-response errors are surfaced as 502 instead of being reported as a failed payment. Calls are coalesced in flight and successful checks are throttled to one per 3 seconds per transaction in a server process.
 
 An expired payment may still be reconciled as paid by a verified late callback or explicit MD5 check. Expiry closes the payment window; it does not prove that funds were never transferred.
 
@@ -152,7 +282,7 @@ curl -X POST http://localhost:3000/api/v1/transactions/simulate \
   -d '{"md5":"MD5_FROM_CHECKOUT","status":"paid","method":"polling"}'
 ```
 
-The next MD5 poll discovers this result. Use `"method":"webhook"` to exercise callback processing instead. This endpoint is only available for pending mock orders.
+The next MD5 poll discovers this result. Use `"method":"webhook"` to exercise callback processing using the order's saved signed, token, or unsigned mode. The simulation request itself does not need authentication headers; the server adds them internally when required. This endpoint is only available for pending mock orders.
 
 ## Storage and deployment
 
@@ -171,7 +301,7 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-API tests use an isolated temporary database and test SDK output, editable price persistence/validation, stale cart detection, callback authentication/idempotency, amount mismatches, expiry reconciliation, MD5 polling, streaming, and mocked Bakong verification. Browser tests build the app and start a separate production-mode mock server on port 3197 (override with `E2E_PORT`) with their own SQLite database. They cover both status methods, failed payments, MD5 lookup, mobile KHR checkout, and price edits through to checkout and reload. No real Bakong transfer is required for these tests.
+API tests use an isolated temporary database and test SDK output, editable price persistence/validation, stale cart detection, provider batch acknowledgement, batch-to-order matching, status mapping, signed/token/unsigned callbacks, raw-body tampering, signature timestamps, mode downgrade rejection, legacy authentication, idempotency, amount mismatches, expiry reconciliation, MD5 polling, streaming, and separation of webhook authentication from Bakong polling credentials. Browser tests build the app and start a separate production-mode mock server on port 3197 (override with `E2E_PORT`) with their own SQLite database. They cover both status methods, all webhook authentication modes, failed payments, MD5 lookup, mobile KHR checkout, and price edits through to checkout and reload. No real Bakong transfer is required for these tests.
 
 ## Bakong references consulted
 

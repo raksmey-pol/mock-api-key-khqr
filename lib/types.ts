@@ -1,5 +1,6 @@
 export type Currency = "USD" | "KHR";
 export type StatusMethod = "webhook" | "polling";
+export type WebhookSignatureMode = "signed" | "token" | "unsigned";
 export type PaymentMode = "mock" | "bakong";
 export type PaymentStatus = "pending" | "paid" | "failed" | "expired";
 
@@ -38,6 +39,8 @@ export type Transaction = {
   items: OrderItem[];
   status: PaymentStatus;
   method: StatusMethod;
+  // Orders created before authentication modes were added use legacy shared-secret authentication.
+  webhookSignatureMode?: WebhookSignatureMode;
   mode: PaymentMode;
   merchantName: string;
   accountId: string;
@@ -67,5 +70,7 @@ export type Health = {
   timestamp: string;
   merchantName: string;
   methods: StatusMethod[];
+  webhookSignatureModes: WebhookSignatureMode[];
+  defaultWebhookSignatureMode: WebhookSignatureMode;
   pollIntervalMs: number;
 };

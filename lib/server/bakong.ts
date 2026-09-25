@@ -39,6 +39,7 @@ export async function checkProvider(transaction: Transaction): Promise<ProviderR
   if (transaction.mode === "mock") return readMockPayment(transaction.md5);
   const config = getConfig();
   if (config.mode !== "bakong") throw new ApiError(409, "Switch to Bakong mode to check this transaction.");
+  if (!config.token) throw new ApiError(503, "BAKONG_TOKEN is required for Bakong MD5 polling.");
   let response: Response;
   try {
     response = await fetch(`${config.baseUrl.replace(/\/$/, "")}/v1/check_transaction_by_md5`, {
@@ -51,6 +52,7 @@ export async function checkProvider(transaction: Transaction): Promise<ProviderR
   } catch {
     throw new ApiError(502, "Bakong is unreachable or timed out. Try checking again.");
   }
+  if (response.status === 401) throw new ApiError(502, "Bakong rejected BAKONG_TOKEN. Use a valid, unexpired token for the configured BAKONG_API_URL.");
   if (!response.ok) throw new ApiError(502, `Bakong returned HTTP ${response.status}. Check your API configuration.`);
   let body: unknown;
   try { body = await response.json(); } catch { throw new ApiError(502, "Bakong returned a non-JSON response."); }

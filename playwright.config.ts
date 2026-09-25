@@ -18,6 +18,6 @@ export default defineConfig({
     url: `http://localhost:${port}/api/v1/health-check`,
     timeout: 120_000,
     reuseExistingServer: false,
-    env: { PAYMENT_MODE: "mock", DATABASE_PATH: `.data/playwright-${process.pid}.sqlite`, WEBHOOK_SECRET: "browser-test-secret" },
+    env: { PAYMENT_MODE: "mock", DATABASE_PATH: `.data/playwright-${process.pid}.sqlite`, WEBHOOK_SECRET: "browser-test-secret", WEBHOOK_SIGNATURE_MODE: "signed" },
   },
 });
