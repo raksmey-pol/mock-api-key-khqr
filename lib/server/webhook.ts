@@ -41,6 +41,32 @@ const providerBatchSchema = z.object({
 const failedProviderStatuses = new Set(["FAILED", "FAILURE", "DECLINED", "REJECTED", "CANCELLED", "CANCELED"]);
 const pendingProviderStatuses = new Set(["PENDING", "PROCESSING", "IN_PROGRESS"]);
 
+const redactedHeaders = new Set([
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "set-cookie",
+  "x-api-key",
+  "x-webhook-secret",
+  "x-webhook-signature",
+]);
+
+function loggableHeaders(headers: Headers) {
+  const entries: Record<string, string> = {};
+  for (const [name, value] of headers) {
+    entries[name] = redactedHeaders.has(name) ? `[redacted length=${value.length}]` : value;
+  }
+  return entries;
+}
+
+function loggableBody(body: string): unknown {
+  try {
+    return JSON.parse(body);
+  } catch {
+    return body;
+  }
+}
+
 function providerAcknowledgement() {
   return {
     status: {
@@ -130,7 +156,8 @@ async function logWebhookResponse(response: Response, startedAt: number) {
     status: response.status,
     statusText: response.statusText,
     contentType: response.headers.get("content-type"),
-    body,
+    headers: loggableHeaders(response.headers),
+    body: loggableBody(body),
   }));
   return response;
 }
@@ -147,12 +174,13 @@ export async function handleCallback(request: Request) {
       url: request.url,
       contentType: request.headers.get("content-type"),
       contentLength: request.headers.get("content-length"),
+      headers: loggableHeaders(request.headers),
       authentication: {
         signatureProvided: request.headers.has("x-webhook-signature"),
         timestampProvided: request.headers.has("x-webhook-timestamp"),
         tokenProvided: request.headers.has("x-webhook-secret"),
       },
-      body: rawBody.toString("utf8"),
+      body: loggableBody(rawBody.toString("utf8")),
     }));
     const payload = parseJson(rawBody);
     const providerBatch = providerBatchSchema.safeParse(payload);
@@ -175,6 +203,7 @@ export async function handleCallback(request: Request) {
         method: request.method,
         url: request.url,
         contentType: request.headers.get("content-type"),
+        headers: loggableHeaders(request.headers),
         error: error instanceof Error ? error.message : "Unknown request error",
       }));
     }

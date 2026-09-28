@@ -524,10 +524,10 @@ test("webhook logging records the exact request and response bodies", async () =
   assert.ok(responseEntry);
   const requestLog = JSON.parse(requestEntry.slice("KHQR_WEBHOOK_REQUEST ".length));
   const responseLog = JSON.parse(responseEntry.slice("KHQR_WEBHOOK_RESPONSE ".length));
-  assert.equal(requestLog.body, body);
+  assert.deepEqual(requestLog.body, JSON.parse(body));
   assert.deepEqual(requestLog.authentication, { signatureProvided: false, timestampProvided: false, tokenProvided: false });
   assert.equal(responseLog.status, 200);
-  assert.equal(responseLog.body, JSON.stringify(providerAcknowledgement));
+  assert.deepEqual(responseLog.body, providerAcknowledgement);
   assert.equal(typeof responseLog.durationMs, "number");
 });
 

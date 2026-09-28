@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   serverExternalPackages: ["bakong-khqr"],
-  allowedDevOrigins: ['idaho-transition-balloon-serious.trycloudflare.com']
+  allowedDevOrigins: ['**.trycloudflare.com', '**.trycloudflare.com']
 };
 
 export default nextConfig;
