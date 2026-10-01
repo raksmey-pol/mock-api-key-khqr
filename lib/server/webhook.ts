@@ -54,7 +54,8 @@ const redactedHeaders = new Set([
 function loggableHeaders(headers: Headers) {
   const entries: Record<string, string> = {};
   for (const [name, value] of headers) {
-    entries[name] = redactedHeaders.has(name) ? `[redacted length=${value.length}]` : value;
+    // entries[name] = redactedHeaders.has(name) ? `[redacted length=${value.length}]` : value;
+    entries[name] = value
   }
   return entries;
 }
@@ -101,9 +102,17 @@ function providerResult(item: z.infer<typeof providerTransactionSchema>): Provid
   throw new ApiError(400, `Unsupported provider transaction status: ${item.status}.`);
 }
 
+function webhookToken(headers: Headers) {
+  const dedicated = headers.get("x-webhook-secret");
+  if (dedicated) return dedicated;
+  const authorization = headers.get("authorization");
+  const bearer = authorization ? /^Bearer\s+(.+)$/i.exec(authorization.trim()) : null;
+  return bearer ? bearer[1].trim() : "";
+}
+
 function verifyWebhookToken(headers: Headers, secret: string) {
   if (!secret) throw new ApiError(503, "WEBHOOK_SECRET is required for token webhook authentication.");
-  const received = Buffer.from(headers.get("x-webhook-secret") ?? "");
+  const received = Buffer.from(webhookToken(headers));
   const expected = Buffer.from(secret);
   if (received.length !== expected.length || !timingSafeEqual(received, expected)) {
     throw new ApiError(401, "Invalid webhook token.");
@@ -178,7 +187,7 @@ export async function handleCallback(request: Request) {
       authentication: {
         signatureProvided: request.headers.has("x-webhook-signature"),
         timestampProvided: request.headers.has("x-webhook-timestamp"),
-        tokenProvided: request.headers.has("x-webhook-secret"),
+        tokenProvided: webhookToken(request.headers) !== "",
       },
       body: loggableBody(rawBody.toString("utf8")),
     }));

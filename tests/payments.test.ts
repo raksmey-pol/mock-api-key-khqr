@@ -265,12 +265,14 @@ test("Bakong mode uses the Open API only for polling and disables mock settlemen
       calls++;
       assert.equal(url, "https://bakong.example.test/v1/check_transaction_by_md5");
       assert.equal(options?.method, "POST");
-      assert.equal(new Headers(options?.headers).get("authorization"), "Bearer test-server-token");
+      assert.equal(new Headers(options?.headers).get("x-api-key"), "test-server-token");
       assert.deepEqual(JSON.parse(options!.body as string), { md5: pollingTransaction.md5 });
-      return Response.json({ responseCode: 0, data: {
-        hash: "b".repeat(64), toAccountId: pollingTransaction.accountId,
-        amount: pollingTransaction.amount, currency: pollingTransaction.currency,
-      } });
+      return Response.json({
+        responseCode: 0, data: {
+          hash: "b".repeat(64), toAccountId: pollingTransaction.accountId,
+          amount: pollingTransaction.amount, currency: pollingTransaction.currency,
+        }
+      });
     };
     const checked = await lookup(pollingTransaction.md5);
     assert.equal(checked.status, 200);
@@ -624,6 +626,20 @@ test("token provider batch callbacks require the shared x-webhook-secret header"
   assert.equal((await callback(rawRequest(body, { "x-webhook-secret": "wrong" }))).status, 401);
   assert.equal(readTransaction(transaction.md5)?.status, "pending");
   const response = await callback(rawRequest(body, { "x-webhook-secret": "integration-test-secret" }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), providerAcknowledgement);
+  assert.equal(readTransaction(transaction.md5)?.status, "paid");
+});
+
+test("token callbacks also accept the credential in an Authorization bearer header", async () => {
+  const transaction = await order("webhook", "USD", "token");
+  const body = JSON.stringify(providerBatch(transaction));
+  assert.equal((await callback(rawRequest(body))).status, 401);
+  assert.equal((await callback(rawRequest(body, { authorization: "Bearer wrong" }))).status, 401);
+  assert.equal((await callback(rawRequest(body, { authorization: "integration-test-secret" }))).status, 401);
+  assert.equal((await callback(rawRequest(body, { authorization: "Basic integration-test-secret" }))).status, 401);
+  assert.equal(readTransaction(transaction.md5)?.status, "pending");
+  const response = await callback(rawRequest(body, { authorization: "Bearer integration-test-secret" }));
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), providerAcknowledgement);
   assert.equal(readTransaction(transaction.md5)?.status, "paid");

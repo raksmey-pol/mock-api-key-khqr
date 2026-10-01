@@ -33,9 +33,9 @@ Click **Edit price** on any product, choose **USD** or **KHR**, enter the new am
 
 ## Webhook or polling?
 
-| Method | How it works |
-| --- | --- |
-| **Polling** | The browser calls this app's search endpoint every 3 seconds. In Bakong mode, the server sends `POST /v1/check_transaction_by_md5` with a server-side Bearer token. In mock mode, it reads the simulated provider result. |
+| Method      | How it works                                                                                                                                                                                                                                      |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Polling** | The browser calls this app's search endpoint every 3 seconds. In Bakong mode, the server sends `POST /v1/check_transaction_by_md5` with a server-side API key in the `x-api-key` header. In mock mode, it reads the simulated provider result.    |
 | **Webhook** | A payment gateway posts a status to `/api/v1/transactions/callback`. Checkout receives local status changes over a server-sent event stream. Webhook mode uses only the selected webhook authentication mode and does not call Bakong's Open API. |
 
 **Bakong's linked public integration guide specifies MD5 polling, not a generic webhook subscription.** This app accepts both the provider's `requestId` + `transactions[]` batch envelope and a compact single-transaction callback. For actual webhook delivery, configure the provider to call this app's publicly reachable callback URL. There is no automatic webhook registration with NBC. Deep-link return URLs are not payment webhooks.
@@ -48,11 +48,11 @@ In mock polling mode, the simulator records a provider outcome; only a later MD5
 
 Under **Your integration → Webhook**, select one of three modes:
 
-| Mode | Callback requirements |
-| --- | --- |
-| **Signed** | HMAC-SHA256 signature over the exact body bytes plus a timestamp. Requires `WEBHOOK_SECRET` on the server. |
-| **Token** | Send `WEBHOOK_SECRET` in the `x-webhook-secret` header. The body is not signed. |
-| **Unsigned** | Plain JSON callback with `Content-Type: application/json`. No authentication header is required. |
+| Mode         | Callback requirements                                                                                      |
+| ------------ | ---------------------------------------------------------------------------------------------------------- |
+| **Signed**   | HMAC-SHA256 signature over the exact body bytes plus a timestamp. Requires `WEBHOOK_SECRET` on the server. |
+| **Token**    | Send `WEBHOOK_SECRET` in the `x-webhook-secret` header. The body is not signed.                            |
+| **Unsigned** | Plain JSON callback with `Content-Type: application/json`. No authentication header is required.           |
 
 The selected `webhookSignatureMode` is stored with each transaction. The receiver enforces that saved policy for all callbacks to the order, including after switching its UI listener between polling and webhook. A callback cannot change the saved mode through a header, query parameter, or body field. Your browser remembers the selection for new checkouts.
 
@@ -68,24 +68,24 @@ Existing orders created before this feature retain their original `x-webhook-sec
 
 Copy `.env.example` to `.env.local` and restart the server after changing configuration.
 
-| Variable | Default / purpose |
-| --- | --- |
-| `PAYMENT_MODE` | `mock` or `bakong`; default `mock` |
-| `DATABASE_PATH` | `.data/khqr.sqlite` |
-| `KHQR_MERCHANT_NAME` | `Mekong Store`; ASCII, maximum 25 characters |
-| `KHQR_MERCHANT_CITY` | `Phnom Penh`; ASCII, maximum 15 characters |
-| `KHQR_EXPIRATION_MINUTES` | `5`; integer from 1 to 10, following the integration guide's maximum payment window |
-| `BAKONG_ACCOUNT_ID` | Receiving account, required in Bakong mode |
-| `BAKONG_TOKEN` | Bakong Open API access token; required only for Bakong MD5 polling, not webhook mode |
-| `BAKONG_API_URL` | `https://api-bakong.nbc.gov.kh`; base URL **without** `/v1` |
-| `KHQR_MERCHANT_ID` | Optional; switches SDK generation from individual to merchant KHQR |
-| `KHQR_ACQUIRING_BANK` | Required when a merchant ID is supplied |
-| `WEBHOOK_SECRET` | HMAC-SHA256 signing key; required for signed callbacks, optional for unsigned callbacks |
-| `WEBHOOK_SIGNATURE_MODE` | Default for new orders: `signed`, `token`, or `unsigned`. If empty, defaults to signed when a key is set, otherwise unsigned. Signed/token require a key. |
+| Variable                  | Default / purpose                                                                                                                                         |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PAYMENT_MODE`            | `mock` or `bakong`; default `mock`                                                                                                                        |
+| `DATABASE_PATH`           | `.data/khqr.sqlite`                                                                                                                                       |
+| `KHQR_MERCHANT_NAME`      | `Mekong Store`; ASCII, maximum 25 characters                                                                                                              |
+| `KHQR_MERCHANT_CITY`      | `Phnom Penh`; ASCII, maximum 15 characters                                                                                                                |
+| `KHQR_EXPIRATION_MINUTES` | `5`; integer from 1 to 10, following the integration guide's maximum payment window                                                                       |
+| `BAKONG_ACCOUNT_ID`       | Receiving account, required in Bakong mode                                                                                                                |
+| `BAKONG_TOKEN`            | Bakong Open API key, sent as the `x-api-key` header; required only for Bakong MD5 polling, not webhook mode                                               |
+| `BAKONG_API_URL`          | `https://api-bakong.nbc.gov.kh`; base URL **without** `/v1`                                                                                               |
+| `KHQR_MERCHANT_ID`        | Optional; switches SDK generation from individual to merchant KHQR                                                                                        |
+| `KHQR_ACQUIRING_BANK`     | Required when a merchant ID is supplied                                                                                                                   |
+| `WEBHOOK_SECRET`          | HMAC-SHA256 signing key; required for signed callbacks, optional for unsigned callbacks                                                                   |
+| `WEBHOOK_SIGNATURE_MODE`  | Default for new orders: `signed`, `token`, or `unsigned`. If empty, defaults to signed when a key is set, otherwise unsigned. Signed/token require a key. |
 
 ### Connect Bakong
 
-1. For Polling, register for an access token through the [Bakong Open API portal](https://api-bakong.nbc.gov.kh/) or the [SIT portal](https://sit-api-bakong.nbc.org.kh/).
+1. For Polling, register for an API key through the [Bakong Open API portal](https://api-bakong.nbc.gov.kh/) or the [SIT portal](https://sit-api-bakong.nbc.org.kh/).
 2. Set `PAYMENT_MODE=bakong` and `BAKONG_ACCOUNT_ID`. Add `BAKONG_TOKEN` and the matching `BAKONG_API_URL` only when using Polling.
 3. Choose **Polling** for the directly documented Bakong MD5 API.
 4. For webhook delivery, register `https://your-host/api/v1/transactions/callback` and choose Signed, Token, or Unsigned. Signed and Token use `WEBHOOK_SECRET`; webhook mode does not require a Bakong API token.
@@ -96,18 +96,18 @@ Credentials remain on the server. In Bakong mode the simulator returns 404. The 
 
 All responses are JSON except the SSE endpoint. Transaction responses use `{ "data": { ... } }`; errors use `{ "error": "..." }` with a suitable HTTP status. Dynamic responses are not cached. Transaction amounts always come from the server-side product catalog.
 
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| `GET` | `/api/v1/health-check` | Configuration/storage readiness, environment, supported update methods; 200 or 503 |
-| `GET` | `/api/v1/products` | Catalog with saved USD/KHR prices |
-| `PATCH` | `/api/v1/products/<productId>` | Save a product's price for the specified currency |
-| `POST` | `/api/v1/transactions` | Create an order and KHQR; returns 201 |
-| `GET` | `/api/v1/transactions` | Most recent 30 orders in the current environment |
-| `POST` | `/api/v1/transactions/callback` | Receive provider batch or compact payment callbacks |
-| `GET` | `/api/v1/transactions/search?md5=<md5>&method=polling` | Check the provider and return the transaction (`polling` is the default) |
-| `GET` | `/api/v1/transactions/search?md5=<md5>&method=webhook` | Read locally recorded callback status without contacting Bakong |
-| `GET` | `/api/v1/transactions/events?md5=<md5>` | SSE events named `transaction` containing the transaction object |
-| `POST` | `/api/v1/transactions/simulate` | Mock-only provider/callback simulation |
+| Method  | Endpoint                                               | Purpose                                                                            |
+| ------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `GET`   | `/api/v1/health-check`                                 | Configuration/storage readiness, environment, supported update methods; 200 or 503 |
+| `GET`   | `/api/v1/products`                                     | Catalog with saved USD/KHR prices                                                  |
+| `PATCH` | `/api/v1/products/<productId>`                         | Save a product's price for the specified currency                                  |
+| `POST`  | `/api/v1/transactions`                                 | Create an order and KHQR; returns 201                                              |
+| `GET`   | `/api/v1/transactions`                                 | Most recent 30 orders in the current environment                                   |
+| `POST`  | `/api/v1/transactions/callback`                        | Receive provider batch or compact payment callbacks                                |
+| `GET`   | `/api/v1/transactions/search?md5=<md5>&method=polling` | Check the provider and return the transaction (`polling` is the default)           |
+| `GET`   | `/api/v1/transactions/search?md5=<md5>&method=webhook` | Read locally recorded callback status without contacting Bakong                    |
+| `GET`   | `/api/v1/transactions/events?md5=<md5>`                | SSE events named `transaction` containing the transaction object                   |
+| `POST`  | `/api/v1/transactions/simulate`                        | Mock-only provider/callback simulation                                             |
 
 ### Update a product price
 
@@ -233,7 +233,8 @@ Example sender using Node.js (use the amount, currency, account, and MD5 from yo
 import { createHmac } from "node:crypto";
 
 const secret = process.env.WEBHOOK_SECRET;
-if (!secret) throw new Error("Set the same WEBHOOK_SECRET as the receiving server.");
+if (!secret)
+  throw new Error("Set the same WEBHOOK_SECRET as the receiving server.");
 
 const body = JSON.stringify({
   md5: "MD5_FROM_CHECKOUT",
@@ -248,15 +249,18 @@ const signature = createHmac("sha256", secret)
   .update(`${timestamp}.${body}`)
   .digest("hex");
 
-const response = await fetch("http://localhost:3000/api/v1/transactions/callback", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    "x-webhook-timestamp": timestamp,
-    "x-webhook-signature": `sha256=${signature}`,
+const response = await fetch(
+  "http://localhost:3000/api/v1/transactions/callback",
+  {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-webhook-timestamp": timestamp,
+      "x-webhook-signature": `sha256=${signature}`,
+    },
+    body,
   },
-  body,
-});
+);
 console.log(response.status, await response.json());
 ```
 

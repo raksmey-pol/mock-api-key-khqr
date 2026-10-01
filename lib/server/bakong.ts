@@ -44,7 +44,7 @@ export async function checkProvider(transaction: Transaction): Promise<ProviderR
   try {
     response = await fetch(`${config.baseUrl.replace(/\/$/, "")}/v1/check_transaction_by_md5`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
+      headers: { "x-api-key": config.token, "Content-Type": "application/json" },
       body: JSON.stringify({ md5: transaction.md5 }),
       cache: "no-store",
       signal: AbortSignal.timeout(10_000),
@@ -52,7 +52,7 @@ export async function checkProvider(transaction: Transaction): Promise<ProviderR
   } catch {
     throw new ApiError(502, "Bakong is unreachable or timed out. Try checking again.");
   }
-  if (response.status === 401) throw new ApiError(502, "Bakong rejected BAKONG_TOKEN. Use a valid, unexpired token for the configured BAKONG_API_URL.");
+  if (response.status === 401) throw new ApiError(502, "Bakong rejected the BAKONG_TOKEN API key. Use a valid, unexpired key for the configured BAKONG_API_URL.");
   if (!response.ok) throw new ApiError(502, `Bakong returned HTTP ${response.status}. Check your API configuration.`);
   let body: unknown;
   try { body = await response.json(); } catch { throw new ApiError(502, "Bakong returned a non-JSON response."); }
