@@ -5,18 +5,18 @@ import type { Currency } from "../../lib/types";
 
 test("webhook checkout receives an external callback, clears the cart, and can be found by MD5", async ({ page, request }, testInfo) => {
   await page.goto("/");
-  await expect(page.getByText("All systems ready")).toBeVisible();
+  await expect(page.locator(".environment-badge")).toContainText("Mock environment");
   await page.screenshot({ path: testInfo.outputPath("storefront-desktop.png"), fullPage: true });
   await page.getByRole("button", { name: "Add Mondulkiri coffee to bag", exact: true }).click();
+  await page.getByRole("button", { name: "Integration settings" }).click();
   await page.getByRole("button", { name: "Webhook", exact: true }).click();
   await page.getByRole("button", { name: "Signed", exact: true }).click();
+  await page.getByRole("dialog", { name: "How should we check payment?" }).getByRole("button", { name: "Close settings" }).click();
   const checkoutResponse = page.waitForResponse((response) => response.url().endsWith("/api/v1/transactions") && response.request().method() === "POST");
   await page.getByRole("button", { name: "Checkout with KHQR" }).click();
   const { data: transaction } = await (await checkoutResponse).json();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("img", { name: /KHQR payment/ })).toBeVisible();
-  await expect(dialog.getByText("Listening for webhook events")).toBeVisible();
-  await expect(dialog.getByText("Signed webhook", { exact: true })).toBeVisible();
   expect(transaction.webhookSignatureMode).toBe("signed");
   const body = JSON.stringify({ md5: transaction.md5, status: "paid", amount: 8.5, currency: "USD", toAccountId: transaction.accountId, transactionId: "browser-external-callback" });
   const timestamp = String(Math.floor(Date.now() / 1000));
@@ -30,7 +30,6 @@ test("webhook checkout receives an external callback, clears the cart, and can b
   });
   expect(callback.ok()).toBeTruthy();
   await expect(dialog.getByRole("heading", { name: "A little good, on its way." })).toBeVisible();
-  await expect(dialog.getByText("Payment confirmed by webhook callback.")).toBeVisible();
   await dialog.getByRole("button", { name: "Back to the store" }).click();
   await expect(page.getByText("A little room for good things.")).toBeVisible();
   await page.getByRole("button", { name: "Transactions", exact: true }).click();
@@ -41,16 +40,17 @@ test("webhook checkout receives an external callback, clears the cart, and can b
 
 test("token webhook requires x-webhook-secret and does not need an Open API token", async ({ page, request }) => {
   await page.goto("/");
-  await expect(page.getByText("All systems ready")).toBeVisible();
+  await expect(page.locator(".environment-badge")).toContainText("Mock environment");
+  await page.getByRole("button", { name: "Integration settings" }).click();
   await page.getByRole("button", { name: "Webhook", exact: true }).click();
   await page.getByRole("button", { name: "Token", exact: true }).click();
+  await page.getByRole("dialog", { name: "How should we check payment?" }).getByRole("button", { name: "Close settings" }).click();
   await page.getByRole("button", { name: "Add The everyday cup to bag", exact: true }).click();
   const checkoutResponse = page.waitForResponse((response) => response.url().endsWith("/api/v1/transactions") && response.request().method() === "POST");
   await page.getByRole("button", { name: "Checkout with KHQR" }).click();
   const { data: transaction } = await (await checkoutResponse).json();
   expect(transaction.webhookSignatureMode).toBe("token");
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("Token webhook", { exact: true })).toBeVisible();
   const payload = { md5: transaction.md5, status: "paid", amount: transaction.amount, currency: transaction.currency, toAccountId: transaction.accountId, transactionId: "browser-token-payment" };
   expect((await request.post("/api/v1/transactions/callback", { data: payload })).status()).toBe(401);
   const callback = await request.post("/api/v1/transactions/callback", { headers: { "x-webhook-secret": "browser-test-secret" }, data: payload });
@@ -62,23 +62,28 @@ test("polling discovers a simulated provider payment", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Add The everyday cup to bag", exact: true }).click();
   await page.getByRole("button", { name: "Checkout with KHQR" }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByRole("button", { name: "Polling", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await dialog.getByRole("button", { name: "Simulate successful payment", exact: true }).click();
-  await expect(dialog.getByRole("heading", { name: "A little good, on its way." })).toBeVisible({ timeout: 12_000 });
-  await expect(dialog.getByText("Payment confirmed by MD5 polling.")).toBeVisible();
+  const checkout = page.getByRole("dialog", { name: "Scan. Pay. All yours." });
+  await checkout.getByRole("button", { name: "Open settings" }).click();
+  const settings = page.getByRole("dialog", { name: "How should we check payment?" });
+  await settings.getByRole("button", { name: "Simulate successful payment", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "A little good, on its way." })).toBeVisible({ timeout: 12_000 });
 });
 
 test("failed webhook simulation leaves the cart available for retry", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByText("All systems ready")).toBeVisible();
+  await expect(page.locator(".environment-badge")).toContainText("Mock environment");
   await page.getByRole("button", { name: "Add Market day tote to bag", exact: true }).click();
+  await page.getByRole("button", { name: "Integration settings" }).click();
   await page.getByRole("button", { name: "Webhook", exact: true }).click();
+  await page.getByRole("dialog", { name: "How should we check payment?" }).getByRole("button", { name: "Close settings" }).click();
   await page.getByRole("button", { name: "Checkout with KHQR" }).click();
-  const dialog = page.getByRole("dialog");
-  await dialog.getByRole("button", { name: "Simulate a failed payment", exact: true }).click();
-  await expect(dialog.getByRole("heading", { name: "Let’s try that again." })).toBeVisible();
-  await dialog.getByRole("button", { name: "Back to checkout", exact: true }).click();
+  const checkout = page.getByRole("dialog", { name: "Scan. Pay. All yours." });
+  await checkout.getByRole("button", { name: "Open settings" }).click();
+  const settings = page.getByRole("dialog", { name: "How should we check payment?" });
+  await settings.getByRole("button", { name: "Simulate a failed payment", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Let’s try that again." })).toBeVisible();
+  await page.getByRole("dialog", { name: "How should we check payment?" }).getByRole("button", { name: "Close settings" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Back to checkout", exact: true }).click();
   await expect(page.getByRole("button", { name: "Checkout with KHQR" })).toBeEnabled();
 });
 
@@ -91,11 +96,14 @@ test("mobile KHR checkout, product filters, and API guide work without horizonta
   await page.getByRole("combobox", { name: "Currency", exact: true }).selectOption("KHR");
   await page.getByRole("button", { name: "Add The everyday cup to bag", exact: true }).click();
   await page.getByRole("button", { name: "Checkout with KHQR" }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByRole("img", { name: /KHQR payment for.*48,000/ })).toBeVisible();
-  await dialog.getByRole("button", { name: "Simulate successful payment", exact: true }).click();
-  await expect(dialog.getByRole("heading", { name: "A little good, on its way." })).toBeVisible({ timeout: 12_000 });
-  await dialog.getByRole("button", { name: "Back to the store", exact: true }).click();
+  const checkout = page.getByRole("dialog", { name: "Scan. Pay. All yours." });
+  await expect(checkout.getByRole("img", { name: /KHQR payment for.*48,000/ })).toBeVisible();
+  await checkout.getByRole("button", { name: "Open settings" }).click();
+  const settings = page.getByRole("dialog", { name: "How should we check payment?" });
+  await settings.getByRole("button", { name: "Simulate successful payment", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "A little good, on its way." })).toBeVisible({ timeout: 12_000 });
+  await page.getByRole("dialog", { name: "How should we check payment?" }).getByRole("button", { name: "Close settings" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Back to the store", exact: true }).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
   await page.getByRole("button", { name: "API guide", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Your API endpoints" })).toBeVisible();
@@ -153,9 +161,11 @@ test("price edit errors preserve the draft and cancel leaves the saved price int
 
 test("provider batch callback updates checkout and returns the exact acknowledgement", async ({ page, request }) => {
   await page.goto("/");
-  await expect(page.getByText("All systems ready")).toBeVisible();
+  await expect(page.locator(".environment-badge")).toContainText("Mock environment");
+  await page.getByRole("button", { name: "Integration settings" }).click();
   await page.getByRole("button", { name: "Webhook", exact: true }).click();
   await page.getByRole("button", { name: "Unsigned", exact: true }).click();
+  await page.getByRole("dialog", { name: "How should we check payment?" }).getByRole("button", { name: "Close settings" }).click();
   await page.getByRole("button", { name: "Add Room for ideas to bag", exact: true }).click();
   const checkoutResponse = page.waitForResponse((response) => response.url().endsWith("/api/v1/transactions") && response.request().method() === "POST");
   await page.getByRole("button", { name: "Checkout with KHQR" }).click();
@@ -182,26 +192,30 @@ test("provider batch callback updates checkout and returns the exact acknowledge
   expect(await response.json()).toEqual({ status: { code: 0, errorCode: null, error: null, message: null, warning: null } });
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("heading", { name: "A little good, on its way." })).toBeVisible();
-  await expect(dialog.getByText("Payment confirmed by webhook callback.")).toBeVisible();
 });
 
 test("unsigned webhook selection persists and accepts an external plain JSON callback", async ({ page, request }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
-  await expect(page.getByText("All systems ready")).toBeVisible();
+  await expect(page.locator(".environment-badge")).toContainText("Mock environment");
+  await page.getByRole("button", { name: "Integration settings" }).click();
+  await expect(page.getByRole("dialog", { name: "How should we check payment?" }).getByText("All systems ready")).toBeVisible();
   await page.getByRole("button", { name: "Webhook", exact: true }).click();
   await page.getByRole("button", { name: "Unsigned", exact: true }).click();
+  await page.getByRole("dialog", { name: "How should we check payment?" }).getByRole("button", { name: "Close settings" }).click();
   await page.reload();
-  await expect(page.getByText("All systems ready")).toBeVisible();
+  await expect(page.locator(".environment-badge")).toContainText("Mock environment");
+  await page.getByRole("button", { name: "Integration settings" }).click();
+  await expect(page.getByRole("dialog", { name: "How should we check payment?" }).getByText("All systems ready")).toBeVisible();
   await page.getByRole("button", { name: "Webhook", exact: true }).click();
   await expect(page.getByRole("button", { name: "Unsigned", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("dialog", { name: "How should we check payment?" }).getByRole("button", { name: "Close settings" }).click();
   await page.getByRole("button", { name: "Add Market day tote to bag", exact: true }).click();
   const checkoutResponse = page.waitForResponse((response) => response.url().endsWith("/api/v1/transactions") && response.request().method() === "POST");
   await page.getByRole("button", { name: "Checkout with KHQR" }).click();
   const { data: transaction } = await (await checkoutResponse).json();
   expect(transaction.webhookSignatureMode).toBe("unsigned");
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("Unsigned webhook", { exact: true })).toBeVisible();
   const response = await request.post("/api/v1/transactions/callback", {
     data: { md5: transaction.md5, status: "paid", amount: transaction.amount, currency: transaction.currency, toAccountId: transaction.accountId, transactionId: "browser-unsigned-payment" },
   });
@@ -213,13 +227,16 @@ test("unsigned webhook selection persists and accepts an external plain JSON cal
 
 test("unsigned webhook simulator completes checkout", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByText("All systems ready")).toBeVisible();
+  await expect(page.locator(".environment-badge")).toContainText("Mock environment");
+  await page.getByRole("button", { name: "Integration settings" }).click();
   await page.getByRole("button", { name: "Webhook", exact: true }).click();
   await page.getByRole("button", { name: "Unsigned", exact: true }).click();
+  await page.getByRole("dialog", { name: "How should we check payment?" }).getByRole("button", { name: "Close settings" }).click();
   await page.getByRole("button", { name: "Add The everyday cup to bag", exact: true }).click();
   await page.getByRole("button", { name: "Checkout with KHQR" }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("Unsigned webhook", { exact: true })).toBeVisible();
-  await dialog.getByRole("button", { name: "Simulate successful payment", exact: true }).click();
-  await expect(dialog.getByRole("heading", { name: "A little good, on its way." })).toBeVisible();
+  const checkout = page.getByRole("dialog", { name: "Scan. Pay. All yours." });
+  await checkout.getByRole("button", { name: "Open settings" }).click();
+  const settings = page.getByRole("dialog", { name: "How should we check payment?" });
+  await settings.getByRole("button", { name: "Simulate successful payment", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "A little good, on its way." })).toBeVisible();
 });

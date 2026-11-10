@@ -176,6 +176,8 @@ A valid batch receives HTTP 200 with exactly:
 }
 ```
 
+The Bakong developer portal's connectivity test (`isTest: true` or `hash: "TEST_CALLBACK_PROBE"`) is acknowledged with this same response without matching or changing any order, so the portal's endpoint test succeeds even though the probe is not tied to a payment.
+
 In Bakong mode, webhook settlement uses only the order's saved Signed, Token, or Unsigned policy. It does not call `check_transaction_by_md5` and does not require `BAKONG_TOKEN`. The server still validates the amount, currency, and recipient against the order.
 
 #### Callback logging
@@ -185,6 +187,7 @@ Every callback writes two structured entries to the terminal running Next.js:
 - `KHQR_WEBHOOK_REQUEST` includes the timestamp, method, URL, content type/length, whether signature/timestamp/token headers were present, and the exact request body.
 - `KHQR_WEBHOOK_RESPONSE` includes the processing duration, HTTP status/status text, content type, and exact response body.
 - If reading the request fails before a body is available, `KHQR_WEBHOOK_REQUEST_ERROR` records the request metadata and error. The normal response log is still written.
+- Bakong developer portal connectivity probes are recorded as `KHQR_WEBHOOK_TEST_PROBE` and acknowledged without matching an order.
 - Signature and secret values are never logged. The body is logged as required for debugging and can contain account identifiers, amounts, and complete KHQR payloads; protect or redact terminal logs before sharing them.
 
 ### Receive an unsigned compact callback
@@ -225,7 +228,13 @@ x-webhook-timestamp: <Unix timestamp in seconds>
 x-webhook-signature: sha256=<64-character hexadecimal HMAC>
 ```
 
-The signature is `HMAC-SHA256(WEBHOOK_SECRET, timestamp + "." + raw_request_body)`. The timestamp must be within **±300 seconds** of server time. The exact UTF-8 JSON bytes sent over HTTP must match the signed bytes, including whitespace and trailing newlines.
+Bakong callbacks sign with a Stripe-compatible single header instead, which the receiver also accepts:
+
+```text
+webhook-signature: t=<Unix timestamp in seconds>,v1=<64-character hexadecimal HMAC>
+```
+
+Both forms use the same key and message: `HMAC-SHA256(WEBHOOK_SECRET, timestamp + "." + raw_request_body)`, with the timestamp embedded in the header for `t`/`v1` senders. A `t`/`v1` header may list several comma-separated `v1` values for key rotation; the callback is accepted when any of them matches. The timestamp must be within **±300 seconds** of server time. The exact UTF-8 JSON bytes sent over HTTP must match the signed bytes, including whitespace and trailing newlines.
 
 Example sender using Node.js (use the amount, currency, account, and MD5 from your order):
 

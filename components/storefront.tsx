@@ -32,6 +32,7 @@ import {
   Radio,
   RefreshCw,
   Search,
+  Settings,
   ShieldCheck,
   ShoppingBag,
   Sparkles,
@@ -228,44 +229,6 @@ function WebhookSignaturePicker({
   );
 }
 
-function WebhookPolicy({
-  mode,
-}: {
-  mode: Transaction["webhookSignatureMode"];
-}) {
-  return (
-    <div className="webhook-policy">
-      {mode === "signed" ? (
-        <ShieldCheck size={15} />
-      ) : mode === "token" ? (
-        <KeyRound size={15} />
-      ) : (
-        <Webhook size={15} />
-      )}
-      <div>
-        <strong>
-          {mode === "signed"
-            ? "Signed webhook"
-            : mode === "token"
-              ? "Token webhook"
-              : mode === "unsigned"
-                ? "Unsigned webhook"
-                : "Legacy webhook authentication"}
-        </strong>
-        <span>
-          {mode === "signed"
-            ? "HMAC-SHA256 · 5-minute timestamp window"
-            : mode === "token"
-              ? "Shared secret · x-webhook-secret header"
-              : mode === "unsigned"
-                ? "Plain JSON · no authentication required"
-                : "Uses the original shared-secret configuration"}
-        </span>
-      </div>
-    </div>
-  );
-}
-
 function Countdown({ expiresAt }: { expiresAt: string }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -444,134 +407,229 @@ function PriceEditor({
   );
 }
 
-function CheckoutDialog({
-  initial,
-  onClose,
-  onUpdate,
+function SettingsDialog({
+  method,
+  webhookSignatureMode,
   webhookAvailable,
   pollingAvailable,
+  secretAvailable,
+  healthError,
+  healthLoading,
+  activeTransaction,
+  activeMethod,
+  simulateBusy,
+  simulateQueued,
+  checking,
+  checkoutError,
+  onMethodChange,
+  onWebhookModeChange,
+  onClose,
+  onExploreGuide,
+  onRefreshHealth,
+  onSimulate,
+  onCheckNow,
 }: {
-  initial: Transaction;
-  onClose: () => void;
-  onUpdate: (transaction: Transaction) => void;
+  method: StatusMethod;
+  webhookSignatureMode: WebhookSignatureMode;
   webhookAvailable: boolean;
   pollingAvailable: boolean;
+  secretAvailable: boolean;
+  healthError: boolean;
+  healthLoading: boolean;
+  activeTransaction: Transaction | null;
+  activeMethod: StatusMethod;
+  simulateBusy: boolean;
+  simulateQueued: boolean;
+  checking: boolean;
+  checkoutError: string;
+  onMethodChange: (method: StatusMethod) => void;
+  onWebhookModeChange: (mode: WebhookSignatureMode) => void;
+  onClose: () => void;
+  onExploreGuide: () => void;
+  onRefreshHealth: () => void;
+  onSimulate: (status: "paid" | "failed") => void;
+  onCheckNow: () => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
-  const [transaction, setTransaction] = useState(initial);
-  const [method, setMethod] = useState<StatusMethod>(
-    initial.method === "polling" && !pollingAvailable
-      ? "webhook"
-      : initial.method,
-  );
-  const [connection, setConnection] = useState("Connecting…");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [queued, setQueued] = useState(false);
-  const [checking, setChecking] = useState(false);
-  const pending = transaction.status === "pending";
-
-  const receive = useCallback(
-    (next: Transaction) => {
-      setTransaction(next);
-      onUpdate(next);
-    },
-    [onUpdate],
-  );
-
   useEffect(() => {
     const element = dialog.current;
     element?.showModal();
     return () => element?.close();
   }, []);
+  return (
+    <dialog
+      ref={dialog}
+      className="checkout-dialog settings-dialog"
+      aria-labelledby="settings-title"
+      onCancel={onClose}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="dialog-top">
+        <span>
+          <Settings size={15} /> INTEGRATION SETTINGS
+        </span>
+        <button
+          className="icon-button"
+          onClick={onClose}
+          aria-label="Close settings"
+        >
+          <X size={19} />
+        </button>
+      </div>
+      <div className="settings-body">
+        <div className="section-label">
+          <span className="tiny-icon">
+            <Code2 size={14} />
+          </span>
+          YOUR INTEGRATION<span className="small-tag">DEV</span>
+        </div>
+        <h2 id="settings-title">How should we check payment?</h2>
+        <MethodPicker
+          method={method}
+          onChange={onMethodChange}
+          webhookAvailable={webhookAvailable}
+          pollingAvailable={pollingAvailable}
+        />
+        <p>
+          {method === "webhook"
+            ? "Receive a callback when payment is complete. Your checkout updates in real time."
+            : "Check the transaction MD5 every 3 seconds. A direct connection to Bakong’s status API."}
+        </p>
+        {method === "webhook" && (
+          <WebhookSignaturePicker
+            mode={webhookSignatureMode}
+            onChange={onWebhookModeChange}
+            secretAvailable={secretAvailable}
+          />
+        )}
+        <div className="endpoint-preview">
+          <span>{method === "webhook" ? "POST" : "GET"}</span>
+          <code>
+            {method === "webhook"
+              ? "/transactions/callback"
+              : "/transactions/search?md5=…"}
+          </code>
+        </div>
+        <button className="integration-link" onClick={onExploreGuide}>
+          Explore the API guide
+          <ArrowUpRight size={14} />
+        </button>
+        <div className="payment-controls">
+          <div className="section-label">PAYMENT CONTROLS</div>
+          {activeTransaction ? (
+            <>
+              <div className="controls-status">
+                <StatusBadge status={activeTransaction.status} />
+                <code>{activeTransaction.md5}</code>
+              </div>
+              {(activeTransaction.status === "pending" ||
+                activeTransaction.status === "expired") && (
+                <button
+                  className="secondary-button check-now"
+                  disabled={checking}
+                  onClick={onCheckNow}
+                >
+                  <RefreshCw size={14} className={checking ? "spin" : ""} />
+                  {checking ? "Checking…" : "Check MD5 now"}
+                </button>
+              )}
+              {activeTransaction.status === "pending" &&
+                activeTransaction.mode === "mock" && (
+                  <div className="simulator">
+                    <div>
+                      <Terminal size={15} />
+                      <strong>Payment simulator</strong>
+                      <span>MOCK</span>
+                    </div>
+                    <p>
+                      {activeMethod === "webhook"
+                        ? activeTransaction.webhookSignatureMode === "signed"
+                          ? "The server signs the test result before sending it to the callback handler."
+                          : activeTransaction.webhookSignatureMode === "token"
+                            ? "The server adds the webhook token before sending the test result."
+                            : activeTransaction.webhookSignatureMode === "unsigned"
+                              ? "Send an unsigned test result to the callback handler."
+                              : "Send a test result through the legacy callback handler."
+                        : "Send a test result through the mock provider."}
+                    </p>
+                    <button
+                      className="primary-button"
+                      disabled={simulateBusy || simulateQueued}
+                      onClick={() => onSimulate("paid")}
+                    >
+                      {simulateBusy ? (
+                        <LoaderCircle className="spin" size={16} />
+                      ) : (
+                        <Check size={16} />
+                      )}
+                      {simulateQueued
+                        ? "Result sent · waiting for update"
+                        : "Simulate successful payment"}
+                    </button>
+                    <button
+                      className="text-button"
+                      disabled={simulateBusy || simulateQueued}
+                      onClick={() => onSimulate("failed")}
+                    >
+                      Simulate a failed payment
+                    </button>
+                  </div>
+                )}
+              {checkoutError && (
+                <p className="error-message" role="alert">
+                  {checkoutError}
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="controls-hint">
+              Create a checkout, then simulate or check its payment here.
+            </p>
+          )}
+        </div>
+        <button
+          className={`health-panel ${healthError ? "unhealthy" : ""}`}
+          onClick={onRefreshHealth}
+          disabled={healthLoading}
+        >
+          <span className="health-indicator" />
+          <span>
+            <strong>
+              {healthError
+                ? "Service unavailable"
+                : healthLoading
+                  ? "Checking service…"
+                  : "All systems ready"}
+            </strong>
+            <code>/api/v1/health-check</code>
+          </span>
+          <RefreshCw size={14} className={healthLoading ? "spin" : ""} />
+        </button>
+      </div>
+    </dialog>
+  );
+}
 
+function CheckoutDialog({
+  transaction,
+  error,
+  onClose,
+  onOpenSettings,
+}: {
+  transaction: Transaction;
+  error: string;
+  onClose: () => void;
+  onOpenSettings: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
-    if (!pending) return;
-    let stopped = false;
-    if (method === "webhook") {
-      const source = new EventSource(
-        `/api/v1/transactions/events?md5=${initial.md5}`,
-      );
-      source.onopen = () => {
-        setConnection("Listening for webhook events");
-        setError("");
-      };
-      source.addEventListener("transaction", (event: MessageEvent) => {
-        const next = JSON.parse(event.data) as Transaction;
-        receive(next);
-        if (next.status !== "pending") source.close();
-      });
-      source.onerror = () => setConnection("Reconnecting to event stream…");
-      return () => source.close();
-    }
-    const controller = new AbortController();
-    let timeout: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      try {
-        const result = await requestApi<{ data: Transaction }>(
-          `/api/v1/transactions/search?md5=${initial.md5}&method=polling`,
-          {
-            signal: AbortSignal.any([
-              controller.signal,
-              AbortSignal.timeout(15_000),
-            ]),
-          },
-        );
-        if (stopped) return;
-        receive(result.data);
-        setError("");
-        setConnection(
-          `Last checked ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`,
-        );
-        if (result.data.status !== "pending") return;
-      } catch (error) {
-        if (stopped) return;
-        setError(
-          error instanceof Error ? error.message : "Could not check payment.",
-        );
-        setConnection("Check failed · retrying in 3 seconds");
-      }
-      if (!stopped) timeout = setTimeout(poll, 3000);
-    };
-    void poll();
-    return () => {
-      stopped = true;
-      controller.abort();
-      clearTimeout(timeout);
-    };
-  }, [initial.md5, method, pending, receive]);
-
-  async function simulate(status: "paid" | "failed") {
-    setBusy(true);
-    setError("");
-    try {
-      await requestApi(
-        "/api/v1/transactions/simulate",
-        post({ md5: transaction.md5, status, method }),
-      );
-      setQueued(true);
-    } catch (error) {
-      setError(error instanceof Error ? error.message : "Simulation failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function checkNow() {
-    setChecking(true);
-    setError("");
-    try {
-      const result = await requestApi<{ data: Transaction }>(
-        `/api/v1/transactions/search?md5=${transaction.md5}&method=polling`,
-      );
-      receive(result.data);
-    } catch (error) {
-      setError(error instanceof Error ? error.message : "Check failed.");
-    } finally {
-      setChecking(false);
-    }
-  }
-
+    const element = dialog.current;
+    element?.showModal();
+    return () => element?.close();
+  }, []);
+  const pending = transaction.status === "pending";
   return (
     <dialog
       ref={dialog}
@@ -586,13 +644,22 @@ function CheckoutDialog({
         <span>
           <ShieldCheck size={16} /> KHQR CHECKOUT
         </span>
-        <button
-          className="icon-button"
-          onClick={onClose}
-          aria-label="Close checkout"
-        >
-          <X size={21} />
-        </button>
+        <div className="dialog-actions">
+          <button
+            className="icon-button"
+            onClick={onOpenSettings}
+            aria-label="Open settings"
+          >
+            <Settings size={18} />
+          </button>
+          <button
+            className="icon-button"
+            onClick={onClose}
+            aria-label="Close checkout"
+          >
+            <X size={21} />
+          </button>
+        </div>
       </div>
       <div className="checkout-content">
         <div className="payment-side">
@@ -614,7 +681,7 @@ function CheckoutDialog({
                 : transaction.status === "expired"
                   ? "Close checkout to generate a new payment, or check a late transfer below."
                   : transaction.mode === "mock"
-                    ? "A demo checkout. Use the simulator below to complete your order."
+                    ? "A demo checkout. Open settings to simulate the payment."
                     : "Scan with Bakong or any banking app that supports KHQR."}
           </p>
           {pending ? (
@@ -690,123 +757,10 @@ function CheckoutDialog({
               </div>
             ))}
           </div>
-        </div>
-        <div className="payment-details">
-          <div className="section-label">
-            <Radio size={16} /> PAYMENT UPDATES
-          </div>
-          {pending && (
-            <MethodPicker
-              method={method}
-              onChange={(value) => {
-                setMethod(value);
-                setConnection("Connecting…");
-              }}
-              webhookAvailable={webhookAvailable}
-              pollingAvailable={pollingAvailable}
-            />
-          )}
-          <p className="detail-description">
-            {method === "webhook"
-              ? "The callback updates your order. A live event stream brings that status here."
-              : "Your server checks the KHQR MD5 every 3 seconds until the payment is complete."}
-          </p>
-          {method === "webhook" && (
-            <WebhookPolicy mode={transaction.webhookSignatureMode} />
-          )}
-          <div className={`connection-state ${pending ? "" : "complete"}`}>
-            <span className={pending ? "pulse-dot" : ""} />
-            {pending ? connection : `Payment ${transaction.status}`}
-          </div>
-          <div className="hash-detail">
-            <span>TRANSACTION MD5</span>
-            <code>{transaction.md5}</code>
-            <CopyButton value={transaction.md5} label="Copy MD5" />
-          </div>
-          <details className="payload-details">
-            <summary>
-              View KHQR payload
-              <Code2 size={14} />
-            </summary>
-            <code>{transaction.qr}</code>
-            <CopyButton value={transaction.qr} label="Copy payload" />
-          </details>
-          <div className="event-section">
-            <div className="section-label">ACTIVITY</div>
-            <ol>
-              {transaction.events.map((event) => (
-                <li key={event.id}>
-                  <span className="event-dot" />
-                  <div>
-                    <p>{event.message}</p>
-                    <time>
-                      {new Date(event.at).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                        second: "2-digit",
-                      })}{" "}
-                      · {event.source}
-                    </time>
-                  </div>
-                </li>
-              ))}
-            </ol>
-          </div>
-          {pending && transaction.mode === "mock" && (
-            <div className="simulator">
-              <div>
-                <Terminal size={15} />
-                <strong>Payment simulator</strong>
-                <span>MOCK</span>
-              </div>
-              <p>
-                {method === "webhook"
-                  ? transaction.webhookSignatureMode === "signed"
-                    ? "The server signs the test result before sending it to the callback handler."
-                    : transaction.webhookSignatureMode === "token"
-                      ? "The server adds the webhook token before sending the test result."
-                      : transaction.webhookSignatureMode === "unsigned"
-                        ? "Send an unsigned test result to the callback handler."
-                        : "Send a test result through the legacy callback handler."
-                  : "Send a test result through the mock provider."}
-              </p>
-              <button
-                className="primary-button"
-                disabled={busy || queued}
-                onClick={() => simulate("paid")}
-              >
-                {busy ? (
-                  <LoaderCircle className="spin" size={16} />
-                ) : (
-                  <Check size={16} />
-                )}
-                {queued
-                  ? "Result sent · waiting for update"
-                  : "Simulate successful payment"}
-              </button>
-              <button
-                className="text-button"
-                disabled={busy || queued}
-                onClick={() => simulate("failed")}
-              >
-                Simulate a failed payment
-              </button>
-            </div>
-          )}
           {error && (
             <p className="error-message" role="alert">
               {error}
             </p>
-          )}
-          {(pending || transaction.status === "expired") && (
-            <button
-              className="secondary-button check-now"
-              disabled={checking}
-              onClick={checkNow}
-            >
-              <RefreshCw size={14} className={checking ? "spin" : ""} />
-              {checking ? "Checking…" : "Check MD5 now"}
-            </button>
           )}
           {!pending && (
             <button className="primary-button" onClick={onClose}>
@@ -1014,6 +968,11 @@ export default function Storefront() {
   const [search, setSearch] = useState("");
   const [searchLoading, setSearchLoading] = useState(false);
   const [notice, setNotice] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [simulateBusy, setSimulateBusy] = useState(false);
+  const [simulateQueued, setSimulateQueued] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkoutError, setCheckoutError] = useState("");
   const checkoutMd5 = useRef<string | null>(null);
 
   const checkHealth = useCallback(() => {
@@ -1092,6 +1051,75 @@ export default function Storefront() {
     return () => clearTimeout(timeout);
   }, [notice]);
 
+  const updateTransaction = useCallback((next: Transaction) => {
+    setHistory((current) =>
+      [next, ...current.filter((item) => item.md5 !== next.md5)].slice(0, 30),
+    );
+    setTransaction((current) =>
+      current && current.md5 === next.md5 ? next : current,
+    );
+    if (next.status === "paid" && checkoutMd5.current === next.md5) {
+      setCart([]);
+      checkoutMd5.current = null;
+    }
+    if (next.status !== "pending") setSimulateQueued(false);
+  }, []);
+
+  const pollingAvailable = health?.methods.includes("polling") ?? false;
+  const transactionPending = transaction?.status === "pending";
+  const transactionMd5 = transaction?.md5 ?? null;
+  const activeMethod: StatusMethod = transaction
+    ? transaction.method === "polling" && !pollingAvailable
+      ? "webhook"
+      : transaction.method
+    : "polling";
+
+  useEffect(() => {
+    if (!transactionMd5 || !transactionPending) return;
+    if (activeMethod === "webhook") {
+      const source = new EventSource(
+        `/api/v1/transactions/events?md5=${transactionMd5}`,
+      );
+      source.addEventListener("transaction", (event: MessageEvent) => {
+        const next = JSON.parse(event.data) as Transaction;
+        updateTransaction(next);
+      });
+      return () => source.close();
+    }
+    let stopped = false;
+    const controller = new AbortController();
+    let timeout: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const result = await requestApi<{ data: Transaction }>(
+          `/api/v1/transactions/search?md5=${transactionMd5}&method=polling`,
+          {
+            signal: AbortSignal.any([
+              controller.signal,
+              AbortSignal.timeout(15_000),
+            ]),
+          },
+        );
+        if (stopped) return;
+        updateTransaction(result.data);
+        setCheckoutError("");
+        if (result.data.status !== "pending") return;
+      } catch (error) {
+        if (stopped) return;
+        setCheckoutError(
+          error instanceof Error ? error.message : "Could not check payment.",
+        );
+      }
+      if (!stopped) timeout = setTimeout(poll, 3000);
+    };
+    void poll();
+    return () => {
+      stopped = true;
+      controller.abort();
+      clearTimeout(timeout);
+    };
+  }, [transactionMd5, transactionPending, activeMethod, updateTransaction]);
+
   const totalCount = cart.reduce((total, item) => total + item.quantity, 0);
   const total = priceOrder(cart, currency, products).amount;
   const visibleProducts = products.filter(
@@ -1131,16 +1159,6 @@ export default function Storefront() {
     });
   }
 
-  const updateTransaction = useCallback((next: Transaction) => {
-    setHistory((current) =>
-      [next, ...current.filter((item) => item.md5 !== next.md5)].slice(0, 30),
-    );
-    if (next.status === "paid" && checkoutMd5.current === next.md5) {
-      setCart([]);
-      checkoutMd5.current = null;
-    }
-  }, []);
-
   async function checkout() {
     setCheckoutLoading(true);
     setError("");
@@ -1158,6 +1176,8 @@ export default function Storefront() {
       checkoutMd5.current = result.data.md5;
       setTransaction(result.data);
       updateTransaction(result.data);
+      setSimulateQueued(false);
+      setCheckoutError("");
     } catch (error) {
       setError(
         error instanceof Error ? error.message : "Could not create checkout.",
@@ -1192,6 +1212,50 @@ export default function Storefront() {
     setView(next);
     setError("");
     if (next === "transactions") void loadHistory();
+  }
+
+  function closeCheckout() {
+    setTransaction(null);
+    setCheckoutError("");
+    setSimulateQueued(false);
+    if (view === "transactions") void loadHistory();
+  }
+
+  async function simulatePayment(status: "paid" | "failed") {
+    if (!transaction) return;
+    setSimulateBusy(true);
+    setCheckoutError("");
+    try {
+      await requestApi(
+        "/api/v1/transactions/simulate",
+        post({ md5: transaction.md5, status, method: activeMethod }),
+      );
+      setSimulateQueued(true);
+    } catch (error) {
+      setCheckoutError(
+        error instanceof Error ? error.message : "Simulation failed.",
+      );
+    } finally {
+      setSimulateBusy(false);
+    }
+  }
+
+  async function checkNow() {
+    if (!transaction) return;
+    setChecking(true);
+    setCheckoutError("");
+    try {
+      const result = await requestApi<{ data: Transaction }>(
+        `/api/v1/transactions/search?md5=${transaction.md5}&method=polling`,
+      );
+      updateTransaction(result.data);
+    } catch (error) {
+      setCheckoutError(
+        error instanceof Error ? error.message : "Check failed.",
+      );
+    } finally {
+      setChecking(false);
+    }
   }
 
   return (
@@ -1252,6 +1316,14 @@ export default function Storefront() {
                   ? "Mock environment"
                   : "Bakong environment"}
           </span>
+          <button
+            className="settings-button"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Integration settings"
+          >
+            <Settings size={15} />
+            Settings
+          </button>
           <button
             className="bag-button"
             aria-label={`View bag with ${totalCount} items`}
@@ -1582,79 +1654,6 @@ export default function Storefront() {
                     </p>
                   )}
                 </section>
-                <section className="panel integration-panel">
-                  <div className="section-label">
-                    <span className="tiny-icon">
-                      <Code2 size={14} />
-                    </span>
-                    YOUR INTEGRATION<span className="small-tag">DEV</span>
-                  </div>
-                  <h3>How should we check payment?</h3>
-                  <MethodPicker
-                    method={method}
-                    onChange={setMethod}
-                    webhookAvailable={
-                      health?.methods.includes("webhook") ?? false
-                    }
-                    pollingAvailable={
-                      health?.methods.includes("polling") ?? false
-                    }
-                  />
-                  <p>
-                    {method === "webhook"
-                      ? "Receive a callback when payment is complete. Your checkout updates in real time."
-                      : "Check the transaction MD5 every 3 seconds. A direct connection to Bakong’s status API."}
-                  </p>
-                  {method === "webhook" && (
-                    <WebhookSignaturePicker
-                      mode={webhookSignatureMode}
-                      onChange={changeWebhookSignatureMode}
-                      secretAvailable={
-                        health?.webhookSignatureModes.includes("signed") ??
-                        false
-                      }
-                    />
-                  )}
-                  <div className="endpoint-preview">
-                    <span>{method === "webhook" ? "POST" : "GET"}</span>
-                    <code>
-                      {method === "webhook"
-                        ? "/transactions/callback"
-                        : "/transactions/search?md5=…"}
-                    </code>
-                  </div>
-                  <button
-                    className="integration-link"
-                    onClick={() => navigate("guide")}
-                  >
-                    Explore the API guide
-                    <ArrowUpRight size={14} />
-                  </button>
-                </section>
-                <button
-                  className={`health-panel ${healthError ? "unhealthy" : ""}`}
-                  onClick={() => {
-                    setHealthLoading(true);
-                    void checkHealth();
-                  }}
-                  disabled={healthLoading}
-                >
-                  <span className="health-indicator" />
-                  <span>
-                    <strong>
-                      {healthError
-                        ? "Service unavailable"
-                        : healthLoading
-                          ? "Checking service…"
-                          : "All systems ready"}
-                    </strong>
-                    <code>/api/v1/health-check</code>
-                  </span>
-                  <RefreshCw
-                    size={14}
-                    className={healthLoading ? "spin" : ""}
-                  />
-                </button>
                 <div className="sidebar-note">
                   <Package size={16} />
                   <p>
@@ -1859,17 +1858,45 @@ export default function Storefront() {
           }}
         />
       )}
+      {settingsOpen && (
+        <SettingsDialog
+          method={method}
+          webhookSignatureMode={webhookSignatureMode}
+          webhookAvailable={health?.methods.includes("webhook") ?? false}
+          pollingAvailable={health?.methods.includes("polling") ?? false}
+          secretAvailable={
+            health?.webhookSignatureModes.includes("signed") ?? false
+          }
+          healthError={healthError}
+          healthLoading={healthLoading}
+          onMethodChange={setMethod}
+          onWebhookModeChange={changeWebhookSignatureMode}
+          onClose={() => setSettingsOpen(false)}
+          onExploreGuide={() => {
+            setSettingsOpen(false);
+            navigate("guide");
+          }}
+          onRefreshHealth={() => {
+            setHealthLoading(true);
+            void checkHealth();
+          }}
+          activeTransaction={transaction}
+          activeMethod={activeMethod}
+          simulateBusy={simulateBusy}
+          simulateQueued={simulateQueued}
+          checking={checking}
+          checkoutError={checkoutError}
+          onSimulate={simulatePayment}
+          onCheckNow={() => void checkNow()}
+        />
+      )}
       {transaction && (
         <CheckoutDialog
           key={transaction.md5}
-          initial={transaction}
-          onClose={() => {
-            setTransaction(null);
-            if (view === "transactions") void loadHistory();
-          }}
-          onUpdate={updateTransaction}
-          webhookAvailable={health?.methods.includes("webhook") ?? false}
-          pollingAvailable={health?.methods.includes("polling") ?? false}
+          transaction={transaction}
+          error={checkoutError}
+          onClose={closeCheckout}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
       )}
     </div>

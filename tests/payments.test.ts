@@ -36,6 +36,10 @@ function signatureHeaders(body: string, secret = "integration-test-secret", time
   };
 }
 
+function stripeSignature(body: string, secret = "integration-test-secret", timestamp = String(Math.floor(Date.now() / 1000))) {
+  return `t=${timestamp},v1=${createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex")}`;
+}
+
 function rawRequest(body: string, headers: Record<string, string> = {}, path = "/api/v1/transactions/callback") {
   return new Request(`http://localhost${path}`, {
     method: "POST",
@@ -398,6 +402,45 @@ test("signed callbacks verify exact bytes and reject missing, modified, stale, a
   assert.deepEqual(readTransaction(transaction.md5), settled);
 });
 
+test("signed callbacks also accept Bakong's webhook-signature t/v1 header", async () => {
+  const transaction = await order("webhook", "USD", "signed");
+  const payload = receipt(transaction);
+  const body = JSON.stringify(payload);
+  const now = Math.floor(Date.now() / 1000);
+  const invalid = [
+    rawRequest(body),
+    rawRequest(body, { "webhook-signature": `t=not-a-timestamp,v1=${"a".repeat(64)}` }),
+    rawRequest(body, { "webhook-signature": "t=1792137009,v1=invalid" }),
+    rawRequest(body, { "webhook-signature": `t=${now},v1=${"a".repeat(64)}` }),
+    rawRequest(body, { "webhook-signature": "sha256=" + "a".repeat(64) }),
+    rawRequest(body, { "webhook-signature": stripeSignature(body, "wrong-key") }),
+    rawRequest(body, { "webhook-signature": stripeSignature(body, "integration-test-secret", String(now - 301)) }),
+    rawRequest(body, { "webhook-signature": stripeSignature(body, "integration-test-secret", String(now + 600)) }),
+    rawRequest(JSON.stringify({ ...payload, amount: payload.amount + 1 }), { "webhook-signature": stripeSignature(body) }),
+  ];
+  for (const request of invalid) {
+    assert.equal((await callback(request)).status, 401);
+    assert.equal(readTransaction(transaction.md5)?.status, "pending");
+  }
+  const rotated = { "webhook-signature": stripeSignature(body).replace("v1=", `v1=${"0".repeat(64)},v1=`) };
+  assert.equal((await callback(rawRequest(body, rotated))).status, 200);
+  const settled = readTransaction(transaction.md5)!;
+  assert.equal(settled.status, "paid");
+  assert.equal((await callback(rawRequest(body, rotated))).status, 200);
+  assert.deepEqual(readTransaction(transaction.md5), settled);
+});
+
+test("signed provider batch callbacks also accept the Bakong t/v1 header", async () => {
+  const transaction = await order("webhook", "KHR", "signed");
+  const body = JSON.stringify(providerBatch(transaction));
+  assert.equal((await callback(rawRequest(body))).status, 401);
+  assert.equal(readTransaction(transaction.md5)?.status, "pending");
+  const signed = await callback(rawRequest(body, { "webhook-signature": stripeSignature(body) }));
+  assert.equal(signed.status, 200);
+  assert.deepEqual(await signed.json(), providerAcknowledgement);
+  assert.equal(readTransaction(transaction.md5)?.status, "paid");
+});
+
 test("signed mode stays bound to the checkout when the default changes or the signing key is removed", async () => {
   const transaction = await order("webhook", "USD", "signed");
   const payload = receipt(transaction);
@@ -617,6 +660,33 @@ test("provider batch callbacks validate matching entries and reject malformed or
     { requestId: "0001", transactions: [{ ...providerBatch(await order()).transactions[0], hash: "invalid" }] },
     { requestId: "0001", transactions: [{ ...providerBatch(await order()).transactions[0], qrCode: undefined }] },
   ]) assert.equal((await callback(rawRequest(JSON.stringify(payload)))).status, 400);
+});
+
+test("Bakong portal connectivity probes are acknowledged without touching storage", async () => {
+  const probes = [
+    { isTest: true },
+    { hash: "TEST_CALLBACK_PROBE" },
+    {
+      isTest: true,
+      hash: "TEST_CALLBACK_PROBE",
+      instructionRef: "TEST_CALLBACK_PROBE",
+      externalRef: "TEST_CALLBACK_PROBE",
+      fromAccountId: "test@bakong",
+      toAccountId: "test@bakong",
+      receiverBank: "TEST",
+      receiverBankAccount: "test@bakong",
+      trackingStatus: "SUCCESS",
+      amount: 0,
+      currency: "USD",
+      description: "Bakong Open API test callback — no action required",
+      createdDateMs: 1791252799686,
+    },
+  ];
+  for (const probe of probes) {
+    const response = await callback(rawRequest(JSON.stringify(probe)));
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), providerAcknowledgement);
+  }
 });
 
 test("token provider batch callbacks require the shared x-webhook-secret header", async () => {

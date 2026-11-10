@@ -80,6 +80,13 @@ function providerAcknowledgement() {
   };
 }
 
+// The Bakong developer portal connectivity probe has no transaction behind it; acknowledge it without touching storage.
+function isTestProbe(payload: unknown) {
+  if (typeof payload !== "object" || payload === null) return false;
+  const probe = payload as Record<string, unknown>;
+  return probe.isTest === true || probe.hash === "TEST_CALLBACK_PROBE";
+}
+
 function providerCurrency(assetId: string): Currency {
   const code = assetId.split("#", 1)[0].trim().toUpperCase();
   if (code === "KHR" || code === "USD") return code;
@@ -185,8 +192,8 @@ export async function handleCallback(request: Request) {
       contentLength: request.headers.get("content-length"),
       headers: loggableHeaders(request.headers),
       authentication: {
-        signatureProvided: request.headers.has("x-webhook-signature"),
-        timestampProvided: request.headers.has("x-webhook-timestamp"),
+        signatureProvided: request.headers.has("x-webhook-signature") || request.headers.has("webhook-signature"),
+        timestampProvided: request.headers.has("x-webhook-timestamp") || request.headers.has("webhook-signature"),
         tokenProvided: webhookToken(request.headers) !== "",
       },
       body: loggableBody(rawBody.toString("utf8")),
@@ -196,6 +203,11 @@ export async function handleCallback(request: Request) {
     if (providerBatch.success) {
       const response = await handleProviderBatch(providerBatch.data, rawBody, request.headers, config);
       return logWebhookResponse(response, startedAt);
+    }
+
+    if (isTestProbe(payload)) {
+      console.info("KHQR_WEBHOOK_TEST_PROBE", JSON.stringify({ timestamp: new Date().toISOString(), url: request.url }));
+      return logWebhookResponse(json(providerAcknowledgement()), startedAt);
     }
 
     const { md5 } = z.object({ md5: md5Schema }).parse(payload);
