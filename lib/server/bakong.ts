@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ProviderResult, Transaction } from "../types";
+import { readRemoteCheckoutSession } from "./checkout";
 import { getConfig } from "./config";
 import { ApiError } from "./http";
 import { readMockPayment } from "./store";
@@ -39,6 +40,30 @@ export async function checkProvider(transaction: Transaction): Promise<ProviderR
   if (transaction.mode === "mock") return readMockPayment(transaction.md5);
   const config = getConfig();
   if (config.mode !== "bakong") throw new ApiError(409, "Switch to Bakong mode to check this transaction.");
+  // Checkout page orders settle through the hosted checkout session rather
+  // than the MD5 transaction API: their QR belongs to the session, not a
+  // locally generated string. The server-side waiter covers webhook orders.
+  if (transaction.checkoutSessionId && config.checkoutProvider === "bakong") {
+    const remote = await readRemoteCheckoutSession(transaction.checkoutSessionId, 10);
+    if (remote.billNo !== transaction.orderNumber || remote.amount !== transaction.amount || remote.currency !== transaction.currency) {
+      throw new ApiError(409, "The checkout page session returned fields that do not match the order.");
+    }
+    // Endpoint 6 belongs to the session, not the local MD5, so a SUCCESS maps
+    // to a full receipt the storefront's single write path records it with.
+    if (remote.status === "SUCCESS") {
+      return {
+        status: "paid",
+        amount: remote.amount,
+        currency: remote.currency,
+        toAccountId: transaction.accountId,
+        transactionId: remote.session_id,
+      };
+    }
+    if (remote.status === "FAILED" || remote.status === "TIMEOUT" || remote.status === "CANCELLED") {
+      return { status: "failed" };
+    }
+    return { status: "pending" };
+  }
   if (!config.token) throw new ApiError(503, "BAKONG_TOKEN is required for Bakong MD5 polling.");
   let response: Response;
   try {

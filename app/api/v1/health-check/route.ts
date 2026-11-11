@@ -9,6 +9,12 @@ export async function GET() {
     const config = getConfig();
     database().prepare("SELECT 1").get();
     const pollingAvailable = config.mode === "mock" || Boolean(config.token);
+    // The hosted checkout page is always emulated in mock deployments; when
+    // both real-provider environment variables are present the sessions are
+    // minted through the configured Bakong checkout Open API instead.
+    const checkoutPage = config.bakongMerchantToken && config.bakongCheckoutApiUrl
+      ? { available: true, provider: "bakong" as const }
+      : { available: true, provider: "mock" as const };
     return json({
       status: "ok", service: "mekong-khqr-store", timestamp: new Date().toISOString(),
       mode: config.mode, storage: "sqlite", merchantName: config.merchantName,
@@ -16,6 +22,7 @@ export async function GET() {
       webhookSignatureModes: config.webhookSecret ? ["signed", "token", "unsigned"] : ["unsigned"],
       defaultWebhookSignatureMode: config.webhookSignatureMode,
       pollIntervalMs: POLL_INTERVAL_MS,
+      checkoutPage,
     });
   } catch {
     return json({ status: "error", error: "Configuration or transaction storage is unavailable.", timestamp: new Date().toISOString() }, 503);

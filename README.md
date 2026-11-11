@@ -15,8 +15,8 @@ Open **http://localhost:3000**. No credentials are required in the default `mock
 
 1. Add products to your bag and select USD or KHR.
 2. Choose **Polling** or **Webhook** under **Your integration**. For webhooks, choose **Signed**, **Token**, or **Unsigned** before creating checkout.
-3. Select **Checkout with KHQR** to generate the QR and its MD5.
-4. Use **Simulate successful payment** or **Simulate a failed payment** in checkout.
+3. Select **Checkout with KHQR**, or open **Your integration** settings and turn **Checkout page** on first to pay through the hosted page, embedded or as a full-page redirect.
+4. Use **Simulate successful payment** or **Simulate a failed payment** in checkout. When the checkout page is on, its demo controls simulate the session settlement instead.
 5. Open **Transactions** to view orders, reopen a checkout, or search an MD5.
 
 The QR is generated and verified with `bakong-khqr`, the JavaScript SDK referenced by NBC. Mock QR codes always use the demo account `mock_store@devb`; the simulator completes these payments without a banking app.
@@ -82,6 +82,44 @@ Copy `.env.example` to `.env.local` and restart the server after changing config
 | `KHQR_ACQUIRING_BANK`     | Required when a merchant ID is supplied                                                                                                                   |
 | `WEBHOOK_SECRET`          | HMAC-SHA256 signing key; required for signed callbacks, optional for unsigned callbacks                                                                   |
 | `WEBHOOK_SIGNATURE_MODE`  | Default for new orders: `signed`, `token`, or `unsigned`. If empty, defaults to signed when a key is set, otherwise unsigned. Signed/token require a key. |
+| `BAKONG_MERCHANT_TOKEN`   | Merchant bearer token for the Bakong checkout page; set together with `BAKONG_CHECKOUT_API_URL` to enable the checkout page                                |
+| `BAKONG_CHECKOUT_API_URL` | Checkout page Open API base URL **without** `/v1` (for example `https://checkout.bakong.nbc.gov.kh`); enabling both also enables the merchant endpoints    |
+
+### Connect the hosted checkout page
+
+Store settings can route enquiry through the hosted Bakong checkout page instead of the inline KHQR, either embedded in the store or as a full-page redirect.
+
+1. With both `BAKONG_MERCHANT_TOKEN` and `BAKONG_CHECKOUT_API_URL` unset (default), the demo emulates the page: it mints local sessions, serves a First-party browser endpoint, and settles from the page's demo controls. In this mode the switch works end to end without real credentials.
+2. With both variables set, the storefront mints `POST /v1/checkout/sessions` against the real Bakong checkout Open API with the merchant token and a UUID `Idempotency-Key`, and returns its `checkout_url`, `session_id`, and `md5`. Orders settle only after the merchant backend long-polls and verifies the session (section 6 and 7.2 of the checkout integration guide); the browser page and its messages are never trusted alone.
+3. One variable without the other is a configuration error: checkout, the health check, and the merchant endpoints surface it as a 503.
+
+### Connect the hosted checkout page
+
+Store settings route enquiry through the hosted Bakong checkout page instead of the inline KHQR, either embedded in the store or as a full-page redirect.
+
+1. With both `BAKONG_MERCHANT_TOKEN` and `BAKONG_CHECKOUT_API_URL` unset (default), the demo emulates the page: it mints local sessions, serves the browser payment endpoint, and settles from the page's demo controls. The switch works end to end without real credentials.
+2. With both variables set, creating checkout with the page display mints a real `POST /v1/checkout/sessions` session with the merchant token and a UUID `Idempotency-Key`, returns its `checkout_url`, `session_id`, and `md5`, and settles each order only after the merchant backend reads and verifies the remote session (sections 6 and 7.2 of the checkout integration guide). The browser page and its messages are never trusted alone, and endpoint #5 cannot fulfil anything.
+3. Setting one variable without the other is a configuration error; checkout, the health check, and the merchant endpoints surface it as a 503. The page switch stores your last choice in the browser and only appears when the provider is configured.
+
+In full-page mode the page returns to the store's `/checkout/return` route with `{BILL_NO}` replaced by the order number; that route searches the store's cached order by bill number and never fulfils from unpacked query parameters.
+
+### Merchant checkout-page endpoints
+
+When the checkout page is available, these merchant endpoints follow the Bakong checkout integration guide's Open API shape (`{ "status": { "code", "message" }, "data": ... }` envelopes) instead of the storefront's own `{ "data": ... }` shape. They require `Authorization: Bearer <BAKONG_MERCHANT_TOKEN>` and reject duplicate idempotent writes:
+
+| Method  | Endpoint                                    | Purpose                                                                                                                |
+| ------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `POST`  | `/api/v1/checkout/sessions`                 | Mint a session with `amount`, `currency`, `billNo`, `successUrl`, `expirySeconds`, `description`, and a UUID `Idempotency-Key`; replaying a key returns the first response |
+| `GET`   | `/api/v1/checkout/sessions`                 | List sessions; filter by `status`, `since`/`until`/`updated_since` epoch seconds, `billNo`, `limit`, and an opaque `cursor` |
+| `GET`   | `/api/v1/checkout/sessions/<id>`            | Read one session; `wait=true&w=90` long-polls until a terminal status or the window closes                              |
+| `POST`  | `/api/v1/checkout/sessions/<id>/cancel`     | Cancel a pending session; terminal sessions return 409                                                                  |
+
+Unauthenticated storefront endpoints for the page itself:
+
+| Method  | Endpoint                                        | Purpose                                                                                                                  |
+| ------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `GET`   | `/api/v1/checkout/sessions/<token>/payment`     | Sanitized browser payload (endpoint #5): status, amount, currency, merchant name, bill display, session expiry, QR image; no md5 or session id. One request per 2 seconds per token; extra calls return 429 with `Retry-After` |
+| `POST`  | `/api/v1/checkout/sessions/<token>/simulate`    | Demo-only payment simulation from the hosted page's controls                                                              |
 
 ### Connect Bakong
 
@@ -108,6 +146,8 @@ All responses are JSON except the SSE endpoint. Transaction responses use `{ "da
 | `GET`   | `/api/v1/transactions/search?md5=<md5>&method=webhook` | Read locally recorded callback status without contacting Bakong                    |
 | `GET`   | `/api/v1/transactions/events?md5=<md5>`                | SSE events named `transaction` containing the transaction object                   |
 | `POST`  | `/api/v1/transactions/simulate`                        | Mock-only provider/callback simulation                                             |
+
+Orders created with `checkoutPage: true` carry `checkoutPageMode` and mint a checkout-page session first: the response includes `checkoutUrl`, `checkoutSessionId`, and `checkoutPageMode` alongside the local order fields.
 
 ### Update a product price
 
@@ -314,7 +354,7 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-API tests use an isolated temporary database and test SDK output, editable price persistence/validation, stale cart detection, provider batch acknowledgement, batch-to-order matching, status mapping, signed/token/unsigned callbacks, raw-body tampering, signature timestamps, mode downgrade rejection, legacy authentication, idempotency, amount mismatches, expiry reconciliation, MD5 polling, streaming, and separation of webhook authentication from Bakong polling credentials. Browser tests build the app and start a separate production-mode mock server on port 3197 (override with `E2E_PORT`) with their own SQLite database. They cover both status methods, all webhook authentication modes, failed payments, MD5 lookup, mobile KHR checkout, and price edits through to checkout and reload. No real Bakong transfer is required for these tests.
+API tests use an isolated temporary database and test SDK output, editable price persistence/validation, stale cart detection, provider batch acknowledgement, batch-to-order matching, status mapping, signed/token/unsigned callbacks, raw-body tampering, signature timestamps, mode downgrade rejection, legacy authentication, idempotency, amount mismatches, expiry reconciliation, MD5 polling, streaming, separation of webhook authentication from Bakong polling credentials, and the hosted checkout page: merchant auth, UUID idempotency replay and drift, bill identity, sanitized payment payload with its two-second rate limit, emulated demo settlement for linked and standalone sessions, cancellation, wait-window validation, listing filters, health provider reporting, and partial-configuration rejection. Browser tests build the app and start a separate production-mode mock server on port 3197 (override with `E2E_PORT`) with their own SQLite database. They cover both status methods, all webhook authentication modes, failed payments, MD5 lookup, mobile KHR checkout, price edits through to checkout and reload, and both checkout-page modes (embedded iframe and full-page redirect). No real Bakong transfer is required for these tests.
 
 ## Bakong references consulted
 

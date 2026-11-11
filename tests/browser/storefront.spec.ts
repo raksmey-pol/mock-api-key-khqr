@@ -240,3 +240,59 @@ test("unsigned webhook simulator completes checkout", async ({ page }) => {
   await settings.getByRole("button", { name: "Simulate successful payment", exact: true }).click();
   await expect(page.getByRole("heading", { name: "A little good, on its way." })).toBeVisible();
 });
+
+test("the checkout page switch embeds the hosted page and settles through the storefront", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Integration settings" }).click();
+  const settings = page.getByRole("dialog", { name: "How should we check payment?" });
+  await expect(settings.getByText("CHECKOUT PRESENTATION")).toBeVisible();
+  await settings.getByRole("button", { name: "Checkout page" }).click();
+  await expect(settings.getByText("CHECKOUT PAGE MODE")).toBeVisible();
+  await settings.getByRole("button", { name: "Close settings" }).click();
+
+  await page.getByRole("button", { name: "Add The everyday cup to bag", exact: true }).click();
+  const checkoutResponse = page.waitForResponse((response) => response.url().endsWith("/api/v1/transactions") && response.request().method() === "POST");
+  await page.getByRole("button", { name: "Checkout with the page" }).click();
+  const { data: transaction } = await (await checkoutResponse).json();
+  expect(transaction.checkoutPageMode).toBe("iframe");
+  expect(transaction.checkoutSessionId).toBeTruthy();
+  expect(transaction.checkoutUrl).toContain("/checkout/");
+
+  const dialog = page.getByRole("dialog", { name: "Scan. Pay. All yours." });
+  const frame = page.frameLocator(".checkout-page-frame iframe");
+  await expect(frame.getByText("Awaiting payment")).toBeVisible();
+  await expect(frame.locator(".hosted-bill")).toContainText(transaction.orderNumber);
+  await frame.getByRole("button", { name: "Simulate successful payment" }).click();
+  await expect(dialog.getByRole("heading", { name: "A little good, on its way." })).toBeVisible({ timeout: 15_000 });
+  await expect(frame.getByText("Paid")).toBeVisible();
+
+  // The switch survives a reload, matching the browser-persisted integration choices.
+  await page.reload();
+  await page.getByRole("button", { name: "Integration settings" }).click();
+  await expect(page.getByRole("dialog", { name: "How should we check payment?" }).getByRole("button", { name: "Checkout page" })).toHaveAttribute("aria-pressed", "true");
+});
+
+test("full-page checkout returns through /checkout/return and verifies server side", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Integration settings" }).click();
+  const settings = page.getByRole("dialog", { name: "How should we check payment?" });
+  await settings.getByRole("button", { name: "Checkout page" }).click();
+  await settings.getByRole("button", { name: "Full page" }).click();
+  await settings.getByRole("button", { name: "Close settings" }).click();
+
+  await page.getByRole("button", { name: "Add The everyday cup to bag", exact: true }).click();
+  await page.getByRole("button", { name: "Checkout on the page" }).click();
+
+  const hosted = page.locator(".hosted-shell");
+  await expect(hosted).toBeVisible();
+  const hostedFrame = page;
+  await hostedFrame.getByRole("button", { name: "Simulate successful payment" }).click();
+  await expect(hosted.getByText("Paid")).toBeVisible();
+  await expect(hosted.getByRole("link", { name: "Back to the store" })).toBeVisible({ timeout: 10_000 });
+
+  // The success redirect goes through /checkout/return?bill={BILL_NO}; that
+  // route only fulfils after the store's backend confirms the settlement.
+  await page.getByRole("heading", { name: "A little good, on its way." }).waitFor();
+  await expect(page.locator(".return-card")).toContainText("Order MK-");
+  await expect(page.locator(".return-card")).not.toContainText("reported SUCCESS");
+});

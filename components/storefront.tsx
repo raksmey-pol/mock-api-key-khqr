@@ -4,11 +4,13 @@ import Image from "next/image";
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
 } from "react";
 import {
+  AppWindow,
   ArrowDown,
   ArrowRight,
   ArrowUpRight,
@@ -49,6 +51,7 @@ import {
 } from "@/lib/catalog";
 import type {
   CartItem,
+  CheckoutPageMode,
   Currency,
   Health,
   Product,
@@ -61,6 +64,8 @@ import { ProductArt } from "./product-art";
 type View = "store" | "transactions" | "guide";
 const CURRENCY_STORAGE_KEY = "mekong:currency";
 const WEBHOOK_SIGNATURE_STORAGE_KEY = "mekong:webhook-signature";
+const CHECKOUT_PAGE_STORAGE_KEY = "mekong:checkout-page";
+const CHECKOUT_PAGE_MODE_STORAGE_KEY = "mekong:checkout-page-mode";
 
 async function requestApi<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -407,9 +412,93 @@ function PriceEditor({
   );
 }
 
+function CheckoutPagePicker({
+  enabled,
+  mode,
+  available,
+  provider,
+  onEnabledChange,
+  onModeChange,
+}: {
+  enabled: boolean;
+  mode: CheckoutPageMode;
+  available: boolean;
+  provider: "mock" | "bakong";
+  onEnabledChange: (enabled: boolean) => void;
+  onModeChange: (mode: CheckoutPageMode) => void;
+}) {
+  return (
+    <div className="webhook-signature-picker checkout-page-setting">
+      <div className="section-label">
+        CHECKOUT PRESENTATION
+        <span className="small-tag">{provider === "bakong" ? "BAKONG API" : "MOCK"}</span>
+      </div>
+      <div className="method-picker" role="group" aria-label="Checkout presentation">
+        <button
+          aria-pressed={!enabled}
+          disabled={!available}
+          onClick={() => onEnabledChange(false)}
+        >
+          <QrCode size={15} />
+          Inline QR
+        </button>
+        <button
+          aria-pressed={enabled}
+          disabled={!available}
+          onClick={() => onEnabledChange(true)}
+        >
+          <ExternalLink size={15} />
+          Checkout page
+        </button>
+      </div>
+      <p>
+        {enabled
+          ? "Pay through the hosted Bakong checkout page. The page confirms every payment with our backend before fulfilment."
+          : "Render the dynamic KHQR inside the store and settle it with your selected method."}
+      </p>
+      {!available && (
+        <p>
+          The checkout page needs <code>BAKONG_MERCHANT_TOKEN</code> and{" "}
+          <code>BAKONG_CHECKOUT_API_URL</code>, set together, to be available.
+        </p>
+      )}
+      {enabled && (
+        <>
+          <div className="section-label">CHECKOUT PAGE MODE</div>
+          <div className="method-picker" role="group" aria-label="Checkout page mode">
+            <button
+              aria-pressed={mode === "iframe"}
+              onClick={() => onModeChange("iframe")}
+            >
+              <AppWindow size={14} />
+              Embedded
+            </button>
+            <button
+              aria-pressed={mode === "redirect"}
+              onClick={() => onModeChange("redirect")}
+            >
+              <ArrowUpRight size={14} />
+              Full page
+            </button>
+          </div>
+          <p>
+            {mode === "iframe"
+              ? "Open the page inside this store. It reports success and expiry through verified browser messages."
+              : "Send the customer to the secure page and back to /checkout/return, where the order is verified again."}
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function SettingsDialog({
   method,
   webhookSignatureMode,
+  checkoutPageEnabled,
+  checkoutPageMode,
+  checkoutPageAvailable,
+  checkoutPageProvider,
   webhookAvailable,
   pollingAvailable,
   secretAvailable,
@@ -423,6 +512,8 @@ function SettingsDialog({
   checkoutError,
   onMethodChange,
   onWebhookModeChange,
+  onCheckoutPageChange,
+  onCheckoutPageModeChange,
   onClose,
   onExploreGuide,
   onRefreshHealth,
@@ -431,6 +522,10 @@ function SettingsDialog({
 }: {
   method: StatusMethod;
   webhookSignatureMode: WebhookSignatureMode;
+  checkoutPageEnabled: boolean;
+  checkoutPageMode: CheckoutPageMode;
+  checkoutPageAvailable: boolean;
+  checkoutPageProvider: "mock" | "bakong";
   webhookAvailable: boolean;
   pollingAvailable: boolean;
   secretAvailable: boolean;
@@ -444,6 +539,8 @@ function SettingsDialog({
   checkoutError: string;
   onMethodChange: (method: StatusMethod) => void;
   onWebhookModeChange: (mode: WebhookSignatureMode) => void;
+  onCheckoutPageChange: (enabled: boolean) => void;
+  onCheckoutPageModeChange: (mode: CheckoutPageMode) => void;
   onClose: () => void;
   onExploreGuide: () => void;
   onRefreshHealth: () => void;
@@ -504,6 +601,14 @@ function SettingsDialog({
             secretAvailable={secretAvailable}
           />
         )}
+        <CheckoutPagePicker
+          enabled={checkoutPageEnabled}
+          mode={checkoutPageMode}
+          available={checkoutPageAvailable}
+          provider={checkoutPageProvider}
+          onEnabledChange={onCheckoutPageChange}
+          onModeChange={onCheckoutPageModeChange}
+        />
         <div className="endpoint-preview">
           <span>{method === "webhook" ? "POST" : "GET"}</span>
           <code>
@@ -512,6 +617,14 @@ function SettingsDialog({
               : "/transactions/search?md5=…"}
           </code>
         </div>
+        {checkoutPageEnabled && (
+          <div className="endpoint-preview">
+            <span>POST</span>
+            <code>
+              /checkout/sessions · GET …/{"{id}"} · GET …/{"{token}"}/payment
+            </code>
+          </div>
+        )}
         <button className="integration-link" onClick={onExploreGuide}>
           Explore the API guide
           <ArrowUpRight size={14} />
@@ -617,19 +730,49 @@ function CheckoutDialog({
   error,
   onClose,
   onOpenSettings,
+  onAccelerator,
 }: {
   transaction: Transaction;
   error: string;
   onClose: () => void;
   onOpenSettings: () => void;
+  onAccelerator?: () => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const frame = useRef<HTMLIFrameElement>(null);
+  const [frameSignal, setFrameSignal] = useState<"scanned" | "expired" | null>(null);
   useEffect(() => {
     const element = dialog.current;
     element?.showModal();
     return () => element?.close();
   }, []);
   const pending = transaction.status === "pending";
+  const checkoutPageEmbedded = Boolean(
+    pending && transaction.checkoutUrl && transaction.checkoutPageMode === "iframe",
+  );
+  const checkoutOrigin = useMemo(() => {
+    if (!transaction.checkoutUrl) return null;
+    try { return new URL(transaction.checkoutUrl, window.location.href).origin; } catch { return null; }
+  }, [transaction.checkoutUrl]);
+
+  // The hosted page posts status accelerators to the verified merchant origin.
+  // Every message is validated against the checkout origin and the frame, and
+  // never fulfils the order alone: the backend listener confirms payment.
+  useEffect(() => {
+    if (!checkoutPageEmbedded || !checkoutOrigin || !transaction.checkoutSessionId) return;
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== checkoutOrigin) return;
+      if (frame.current && event.source !== frame.current.contentWindow) return;
+      const message = (event.data ?? {}) as { type?: string; sessionId?: string };
+      if (message.sessionId && message.sessionId !== transaction.checkoutSessionId) return;
+      if (message.type === "PAYMENT_SUCCESS") onAccelerator?.();
+      else if (message.type === "SESSION_EXPIRED") setFrameSignal("expired");
+      else if (message.type === "SCANNED") setFrameSignal("scanned");
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [checkoutPageEmbedded, checkoutOrigin, transaction.checkoutSessionId, onAccelerator]);
+
   return (
     <dialog
       ref={dialog}
@@ -680,11 +823,47 @@ function CheckoutDialog({
                 ? "This payment failed. Close checkout and create a new payment."
                 : transaction.status === "expired"
                   ? "Close checkout to generate a new payment, or check a late transfer below."
-                  : transaction.mode === "mock"
-                    ? "A demo checkout. Open settings to simulate the payment."
-                    : "Scan with Bakong or any banking app that supports KHQR."}
+                  : transaction.checkoutUrl
+                    ? "The hosted checkout page is open. Payment confirms here once the server verifies it."
+                    : transaction.mode === "mock"
+                      ? "A demo checkout. Open settings to simulate the payment."
+                      : "Scan with Bakong or any banking app that supports KHQR."}
           </p>
-          {pending ? (
+          {pending && transaction.checkoutUrl && transaction.checkoutPageMode === "redirect" ? (
+            <div className="checkout-page-continue">
+              <a
+                className="primary-button"
+                href={transaction.checkoutUrl}
+              >
+                <ExternalLink size={16} />
+                Continue to the checkout page
+              </a>
+              <p>
+                Full-page mode left the store. The secure checkout page returns
+                here with your order as <code>{transaction.orderNumber}</code>.
+              </p>
+            </div>
+          ) : checkoutPageEmbedded ? (
+            <div className="checkout-page-frame">
+              <iframe
+                ref={frame}
+                src={transaction.checkoutUrl}
+                title="Bakong checkout"
+                allow="clipboard-write"
+                sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+              />
+              {frameSignal && (
+                <p className={frameSignal === "scanned" ? "checkout-frame-signal" : "checkout-frame-signal expired"}>
+                  {frameSignal === "scanned"
+                    ? "Payment detected. Waiting for the server to confirm it."
+                    : "The checkout page reports an expired session. The server confirms the final state."}
+                </p>
+              )}
+              {error && (
+                <p className="error-message" role="alert">{error}</p>
+              )}
+            </div>
+          ) : pending ? (
             <div className="khqr-card">
               <div className="khqr-banner">
                 KHQR<span>៛</span>
@@ -730,16 +909,18 @@ function CheckoutDialog({
               )}
             </div>
           )}
-          {pending && (
+          {pending && transaction.checkoutPageMode !== "redirect" && (
             <div className="qr-actions">
               <Countdown expiresAt={transaction.expiresAt} />
-              <a
-                href={transaction.qrImage}
-                download={`${transaction.orderNumber}.png`}
-              >
-                <Download size={14} />
-                Save QR
-              </a>
+              {!checkoutPageEmbedded && (
+                <a
+                  href={transaction.qrImage}
+                  download={`${transaction.orderNumber}.png`}
+                >
+                  <Download size={14} />
+                  Save QR
+                </a>
+              )}
             </div>
           )}
           <div className="checkout-order">
@@ -757,7 +938,7 @@ function CheckoutDialog({
               </div>
             ))}
           </div>
-          {error && (
+          {error && !checkoutPageEmbedded && !pending && (
             <p className="error-message" role="alert">
               {error}
             </p>
@@ -781,7 +962,7 @@ function ApiGuide() {
     [
       "GET",
       "/api/v1/health-check",
-      "Service health, active payment environment, and available update methods.",
+      "Service health, active payment environment, checkout page provider, and available update methods.",
     ],
     [
       "GET",
@@ -796,7 +977,7 @@ function ApiGuide() {
     [
       "POST",
       "/api/v1/transactions",
-      "Create an order with server-calculated prices and generate its dynamic KHQR.",
+      "Create an order with server-calculated prices and generate its dynamic KHQR. Send checkoutPage to mint a hosted checkout session.",
     ],
     [
       "POST",
@@ -812,6 +993,26 @@ function ApiGuide() {
       "GET",
       "/api/v1/transactions/events?md5=…",
       "Stream locally stored status changes to the checkout using server-sent events.",
+    ],
+    [
+      "POST",
+      "/api/v1/checkout/sessions",
+      "Mint a hosted checkout session with the merchant bearer token and a UUID Idempotency-Key.",
+    ],
+    [
+      "GET",
+      "/api/v1/checkout/sessions/:sessionId",
+      "Read a session; send wait=true&w=90 to long-poll until a terminal status.",
+    ],
+    [
+      "GET",
+      "/api/v1/checkout/sessions/:token/payment",
+      "The hosted page's sanitized payload. Token is the credential; no md5 or session id.",
+    ],
+    [
+      "POST",
+      "/api/v1/checkout/sessions/:sessionId/cancel",
+      "Cancel a pending checkout session. Terminal sessions return 409.",
     ],
     [
       "POST",
@@ -910,6 +1111,37 @@ function ApiGuide() {
               Response: status.code = 0
             </p>
           </div>
+          <div className="panel guide-note">
+            <div className="section-label">
+              <ExternalLink size={17} /> CHECKOUT PAGE
+            </div>
+            <h3>One switch, two presentation modes.</h3>
+            <p>
+              Settings can route checkout through the hosted Bakong page, either
+              embedded or full page. The store mints{" "}
+              <code>POST /v1/checkout/sessions</code> server side with the
+              merchant token and a UUID <code>Idempotency-Key</code>, then
+              returns <code>checkout_url</code>, <code>session_id</code>, and{" "}
+              <code>md5</code> to persist with the order.
+            </p>
+            <h3>The page never fulfils.</h3>
+            <p>
+              In embedded mode the page reports{" "}
+              <code>PAYMENT_SUCCESS</code> through a validated{" "}
+              <code>postMessage</code>; in full-page mode it returns to{" "}
+              <code>/checkout/return?bill=&#123;BILL_NO&#125;</code>. Both are
+              accelerators only: the backend listener confirms every payment and
+              only a verified SUCCESS settles the order.
+            </p>
+            <a
+              href="https://bakong.nbc.gov.kh/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Bakong documentation
+              <ExternalLink size={14} />
+            </a>
+          </div>
           <div className="panel guide-note signature-guide">
             <div className="section-label">
               <ShieldCheck size={16} /> WEBHOOK AUTHENTICATION
@@ -956,6 +1188,8 @@ export default function Storefront() {
   const [method, setMethod] = useState<StatusMethod>("polling");
   const [webhookSignatureMode, setWebhookSignatureMode] =
     useState<WebhookSignatureMode>("unsigned");
+  const [checkoutPageEnabled, setCheckoutPageEnabled] = useState(false);
+  const [checkoutPageMode, setCheckoutPageMode] = useState<CheckoutPageMode>("iframe");
   const [category, setCategory] = useState("All goods");
   const [health, setHealth] = useState<Health | null>(null);
   const [healthError, setHealthError] = useState(false);
@@ -995,6 +1229,15 @@ export default function Storefront() {
           /* Use the server default when browser storage is unavailable. */
         }
         setWebhookSignatureMode(selectedMode);
+        if (result.checkoutPage.available) {
+          try {
+            if (localStorage.getItem(CHECKOUT_PAGE_STORAGE_KEY) === "true") setCheckoutPageEnabled(true);
+            const savedPageMode = localStorage.getItem(CHECKOUT_PAGE_MODE_STORAGE_KEY);
+            if (savedPageMode === "iframe" || savedPageMode === "redirect") setCheckoutPageMode(savedPageMode);
+          } catch {
+            /* Use the server default when browser storage is unavailable. */
+          }
+        }
       })
       .catch(() => setHealthError(true))
       .finally(() => setHealthLoading(false));
@@ -1145,6 +1388,24 @@ export default function Storefront() {
     }
   }
 
+  function changeCheckoutPageEnabled(next: boolean) {
+    setCheckoutPageEnabled(next);
+    try {
+      localStorage.setItem(CHECKOUT_PAGE_STORAGE_KEY, String(next));
+    } catch {
+      /* Keep the selection in memory when browser storage is unavailable. */
+    }
+  }
+
+  function changeCheckoutPageMode(next: CheckoutPageMode) {
+    setCheckoutPageMode(next);
+    try {
+      localStorage.setItem(CHECKOUT_PAGE_MODE_STORAGE_KEY, next);
+    } catch {
+      /* Keep the selection in memory when browser storage is unavailable. */
+    }
+  }
+
   function changeQuantity(productId: string, delta: number) {
     setCart((current) => {
       const exists = current.find((item) => item.productId === productId);
@@ -1159,6 +1420,7 @@ export default function Storefront() {
     });
   }
 
+  const checkoutPageAvailable = health?.checkoutPage?.available ?? false;
   async function checkout() {
     setCheckoutLoading(true);
     setError("");
@@ -1171,13 +1433,19 @@ export default function Storefront() {
           method,
           webhookSignatureMode,
           expectedAmount: total,
+          checkoutPage: checkoutPageEnabled && checkoutPageAvailable,
+          checkoutPageMode,
         }),
       );
-      checkoutMd5.current = result.data.md5;
-      setTransaction(result.data);
-      updateTransaction(result.data);
+      const data = result.data;
+      checkoutMd5.current = data.md5;
+      setTransaction(data);
+      updateTransaction(data);
       setSimulateQueued(false);
       setCheckoutError("");
+      if (data.checkoutUrl && data.checkoutPageMode === "redirect") {
+        window.location.assign(data.checkoutUrl);
+      }
     } catch (error) {
       setError(
         error instanceof Error ? error.message : "Could not create checkout.",
@@ -1188,6 +1456,23 @@ export default function Storefront() {
       setCheckoutLoading(false);
     }
   }
+
+  // The browser message from the hosted page is an accelerator only: re-read
+  // the backend state so the dialog confirms through the server just like the
+  // normal listeners do.
+  const verifyAcceleratedPayment = useCallback(async (md5: string) => {
+    try {
+      const result = await requestApi<{ data: Transaction }>(
+        `/api/v1/transactions/search?md5=${encodeURIComponent(md5)}&method=polling`,
+        { signal: AbortSignal.timeout(15_000) },
+      );
+      updateTransaction(result.data);
+    } catch (error) {
+      setCheckoutError(
+        error instanceof Error ? error.message : "Could not confirm the payment.",
+      );
+    }
+  }, [updateTransaction]);
 
   async function searchTransaction(event: FormEvent) {
     event.preventDefault();
@@ -1634,12 +1919,18 @@ export default function Storefront() {
                   >
                     {checkoutLoading ? (
                       <LoaderCircle className="spin" size={17} />
+                    ) : checkoutPageEnabled && checkoutPageAvailable ? (
+                      <ExternalLink size={18} />
                     ) : (
                       <QrCode size={18} />
                     )}
                     {checkoutLoading
-                      ? "Creating your KHQR…"
-                      : "Checkout with KHQR"}
+                      ? "Opening your checkout…"
+                      : checkoutPageEnabled && checkoutPageAvailable
+                        ? checkoutPageMode === "iframe"
+                          ? "Checkout with the page"
+                          : "Checkout on the page"
+                        : "Checkout with KHQR"}
                     <ArrowRight size={16} />
                   </button>
                   <div className="checkout-reassurance">
@@ -1862,6 +2153,10 @@ export default function Storefront() {
         <SettingsDialog
           method={method}
           webhookSignatureMode={webhookSignatureMode}
+          checkoutPageEnabled={checkoutPageEnabled}
+          checkoutPageMode={checkoutPageMode}
+          checkoutPageAvailable={checkoutPageAvailable}
+          checkoutPageProvider={health?.checkoutPage?.provider ?? "mock"}
           webhookAvailable={health?.methods.includes("webhook") ?? false}
           pollingAvailable={health?.methods.includes("polling") ?? false}
           secretAvailable={
@@ -1871,6 +2166,8 @@ export default function Storefront() {
           healthLoading={healthLoading}
           onMethodChange={setMethod}
           onWebhookModeChange={changeWebhookSignatureMode}
+          onCheckoutPageChange={changeCheckoutPageEnabled}
+          onCheckoutPageModeChange={changeCheckoutPageMode}
           onClose={() => setSettingsOpen(false)}
           onExploreGuide={() => {
             setSettingsOpen(false);
@@ -1897,6 +2194,7 @@ export default function Storefront() {
           error={checkoutError}
           onClose={closeCheckout}
           onOpenSettings={() => setSettingsOpen(true)}
+          onAccelerator={() => void verifyAcceleratedPayment(transaction.md5)}
         />
       )}
     </div>

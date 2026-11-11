@@ -1,14 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { BakongKHQR } from "bakong-khqr";
-import QRCode from "qrcode";
 import { z } from "zod";
 import { priceOrder } from "../catalog";
-import type { ProviderResult, Transaction, TransactionEvent } from "../types";
+import type { ProviderResult, Transaction } from "../types";
 import { checkProvider } from "./bakong";
 import { getConfig, POLL_INTERVAL_MS } from "./config";
 import { ApiError } from "./http";
+import { buildKhqrDetails, generateKhqr, qrImage } from "./khqr";
 import { getProducts } from "./products";
-import { insertTransaction, readTransaction, updateTransaction } from "./store";
+import { insertTransaction, readTransaction, readTransactionByOrderNumber, updateTransaction } from "./store";
+import { attachCheckoutSession } from "./checkout";
+import { addEvent } from "./checkout-settle";
 
 export const md5Schema = z.string().regex(/^[a-fA-F0-9]{32}$/, "MD5 must be a 32-character hexadecimal string.").transform((value) => value.toLowerCase());
 export const methodSchema = z.enum(["webhook", "polling"]);
@@ -18,16 +20,11 @@ export const checkoutSchema = z.object({
   method: methodSchema.default("polling"),
   webhookSignatureMode: z.enum(["signed", "token", "unsigned"]).optional(),
   expectedAmount: z.number().positive().optional(),
+  checkoutPage: z.boolean().default(false),
+  checkoutPageMode: z.enum(["iframe", "redirect"]).default("iframe"),
 }).strict();
 
-function addEvent(transaction: Transaction, source: TransactionEvent["source"], message: string) {
-  const now = new Date().toISOString();
-  transaction.updatedAt = now;
-  transaction.events = [...transaction.events, { id: randomUUID(), at: now, source, message }].slice(-30);
-  return transaction;
-}
-
-export async function createTransaction(body: unknown) {
+export async function createTransaction(body: unknown, options: { origin: string } = { origin: "http://localhost" }) {
   const input = checkoutSchema.parse(body);
   const config = getConfig();
   const webhookSignatureMode = input.webhookSignatureMode ?? config.webhookSignatureMode;
@@ -47,28 +44,24 @@ export async function createTransaction(body: unknown) {
   const orderNumber = `MK-${id.replaceAll("-", "").slice(0, 16).toUpperCase()}`;
   const now = new Date();
   const expiration = now.getTime() + config.expirationMinutes * 60_000;
-  const details = {
-    bakongAccountID: config.accountId,
+  const details = buildKhqrDetails({
+    accountId: config.accountId,
     merchantName: config.merchantName,
     merchantCity: config.merchantCity,
-    ...(config.acquiringBank ? { acquiringBank: config.acquiringBank } : {}),
-    currency: input.currency === "USD" ? 840 : 116,
+    acquiringBank: config.acquiringBank || undefined,
+    merchantId: config.merchantId || undefined,
+    currency: input.currency,
     amount: order.amount,
     billNumber: orderNumber,
-    storeLabel: "Mekong Store",
-    terminalLabel: "Web checkout",
     expirationTimestamp: expiration,
-  };
-  const sdk = new BakongKHQR();
-  const response = config.merchantId
-    ? sdk.generateMerchant({ ...details, merchantID: config.merchantId, acquiringBank: config.acquiringBank })
-    : sdk.generateIndividual(details);
+  });
+  const response = generateKhqr(details);
   const data = z.object({ qr: z.string(), md5: md5Schema }).safeParse(response.data);
   if (response.status.code !== 0 || !data.success) throw new ApiError(503, response.status.message ?? "KHQR generation failed. Check merchant settings.");
   if (!BakongKHQR.verify(data.data.qr).isValid) throw new ApiError(500, "Generated KHQR did not pass verification.");
   const transaction: Transaction = {
     id, orderNumber, ...data.data,
-    qrImage: await QRCode.toDataURL(data.data.qr, { width: 400, margin: 4, errorCorrectionLevel: "M" }),
+    qrImage: await qrImage(data.data.qr),
     ...order, currency: input.currency, status: "pending", method: input.method, mode: config.mode,
     webhookSignatureMode,
     merchantName: config.merchantName, accountId: config.accountId,
@@ -77,7 +70,9 @@ export async function createTransaction(body: unknown) {
   };
   addEvent(transaction, "checkout", "Order created and dynamic KHQR generated.");
   insertTransaction(transaction);
-  return transaction;
+  return input.checkoutPage
+    ? await attachCheckoutSession(transaction, { origin: options.origin, pageMode: input.checkoutPageMode })
+    : transaction;
 }
 
 export function requireTransaction(md5: string) {
@@ -88,13 +83,21 @@ export function requireTransaction(md5: string) {
 
 export function getTransaction(md5: string) {
   requireTransaction(md5);
-  return updateTransaction(md5, (transaction) => {
-    if (transaction.status === "pending" && Date.parse(transaction.expiresAt) <= Date.now()) {
-      transaction.status = "expired";
-      addEvent(transaction, "system", "The payment window expired. A verified late payment can still be reconciled.");
+  return updateTransaction(md5, (current) => {
+    if (current.status === "pending" && Date.parse(current.expiresAt) <= Date.now()) {
+      current.status = "expired";
+      addEvent(current, "system", "The payment window expired. A verified late payment can still be reconciled.");
     }
-    return transaction;
+    return current;
   })!;
+}
+
+export function getTransactionByOrderNumber(orderNumber: string) {
+  const transaction = readTransactionByOrderNumber(orderNumber);
+  if (!transaction || transaction.mode !== getConfig().mode) {
+    throw new ApiError(404, "No order found for this bill number.");
+  }
+  return getTransaction(transaction.md5);
 }
 
 export function applyResult(md5: string, result: ProviderResult, source: "webhook" | "polling") {

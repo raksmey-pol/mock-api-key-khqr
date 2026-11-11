@@ -39,3 +39,16 @@ export function apiError(error: unknown) {
   console.error("KHQR request failed:", error);
   return json({ error: "The request could not be completed. Check the server configuration and try again." }, 500);
 }
+
+// Origin used to build callback and checkout-page capability URLs. Prefer the
+// proxy-provided host when one is present, mirroring usual reverse-proxy setups.
+export function requestOrigin(request: Request) {
+  const host = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
+  if (host) {
+    const proto = request.headers.get("x-forwarded-proto")
+      ?? (request.headers.get("x-forwarded-ssl") === "on" ? "https" : undefined)
+      ?? new URL(request.url).protocol.replace(":", "");
+    return `${proto}://${host}`;
+  }
+  return new URL(request.url).origin;
+}
