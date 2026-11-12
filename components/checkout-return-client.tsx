@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ArrowRight, CheckCheck, Clock3, Radio, X } from "lucide-react";
+import { readJsonResponse } from "@/lib/http-client";
 import type { StatusMethod, Transaction } from "@/lib/types";
 
 type Props = {
@@ -39,10 +40,9 @@ export function CheckoutReturnClient({ bill, md5, method, checkoutUrl, reportedS
           cache: "no-store",
           signal: AbortSignal.timeout(15_000),
         });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error ?? "Could not check payment.");
-        if (!stopped) setTransaction(result.data as Transaction);
-        if ((result.data as Transaction).status !== "pending") return;
+        const result = await readJsonResponse<{ data: Transaction }>(response, "The payment status check");
+        if (!stopped) setTransaction(result.data);
+        if (result.data.status !== "pending") return;
       } catch (caught) {
         if (!stopped) setError(caught instanceof Error ? caught.message : "Could not check payment.");
       }

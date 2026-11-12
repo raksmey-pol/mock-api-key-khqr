@@ -49,6 +49,7 @@ import {
   priceOrder,
   products as defaultProducts,
 } from "@/lib/catalog";
+import { readJsonResponse } from "@/lib/http-client";
 import type {
   CartItem,
   CheckoutPageMode,
@@ -73,10 +74,7 @@ async function requestApi<T>(url: string, options?: RequestInit): Promise<T> {
     cache: "no-store",
     signal: options?.signal ?? AbortSignal.timeout(15_000),
   });
-  const result = await response.json();
-  if (!response.ok)
-    throw new Error(result.error ?? "Something went wrong. Please try again.");
-  return result as T;
+  return readJsonResponse<T>(response, `The request to ${url}`);
 }
 
 function post(body: unknown): RequestInit {
