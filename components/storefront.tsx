@@ -50,6 +50,7 @@ import {
   products as defaultProducts,
 } from "@/lib/catalog";
 import { readJsonResponse } from "@/lib/http-client";
+import { openBakongCheckout, waitForBakongCheckout } from "@/lib/bakong-checkout";
 import type {
   CartItem,
   CheckoutPageMode,
@@ -414,6 +415,7 @@ function CheckoutPagePicker({
   enabled,
   mode,
   available,
+  popupAvailable,
   provider,
   onEnabledChange,
   onModeChange,
@@ -421,6 +423,7 @@ function CheckoutPagePicker({
   enabled: boolean;
   mode: CheckoutPageMode;
   available: boolean;
+  popupAvailable: boolean;
   provider: "mock" | "bakong";
   onEnabledChange: (enabled: boolean) => void;
   onModeChange: (mode: CheckoutPageMode) => void;
@@ -478,12 +481,28 @@ function CheckoutPagePicker({
               <ArrowUpRight size={14} />
               Full page
             </button>
+            <button
+              aria-pressed={mode === "popup"}
+              disabled={!popupAvailable}
+              onClick={() => onModeChange("popup")}
+            >
+              <ExternalLink size={14} />
+              Popup
+            </button>
           </div>
           <p>
-            {mode === "iframe"
-              ? "Open the page inside this store. It reports success and expiry through verified browser messages."
-              : "Send the customer to the secure page and back to /checkout/return, where the order is verified again."}
+            {mode === "popup"
+              ? "Open checkout.js in a popup. Closing before paying uses the cancel URL; success only updates the order after the server verifies it."
+              : mode === "iframe"
+                ? "Open the page inside this store. It reports success and expiry through verified browser messages."
+                : "Send the customer to the secure page and back to /checkout/return, where the order is verified again."}
           </p>
+          {enabled && !popupAvailable && (
+            <p>
+              The popup needs <code>CHECKOUT_HOST</code> and the real checkout
+              provider configured.
+            </p>
+          )}
         </>
       )}
     </div>
@@ -496,6 +515,7 @@ function SettingsDialog({
   checkoutPageEnabled,
   checkoutPageMode,
   checkoutPageAvailable,
+  checkoutPagePopupAvailable,
   checkoutPageProvider,
   webhookAvailable,
   pollingAvailable,
@@ -523,6 +543,7 @@ function SettingsDialog({
   checkoutPageEnabled: boolean;
   checkoutPageMode: CheckoutPageMode;
   checkoutPageAvailable: boolean;
+  checkoutPagePopupAvailable: boolean;
   checkoutPageProvider: "mock" | "bakong";
   webhookAvailable: boolean;
   pollingAvailable: boolean;
@@ -603,6 +624,7 @@ function SettingsDialog({
           enabled={checkoutPageEnabled}
           mode={checkoutPageMode}
           available={checkoutPageAvailable}
+          popupAvailable={checkoutPagePopupAvailable}
           provider={checkoutPageProvider}
           onEnabledChange={onCheckoutPageChange}
           onModeChange={onCheckoutPageModeChange}
@@ -841,6 +863,16 @@ function CheckoutDialog({
                 here with your order as <code>{transaction.orderNumber}</code>.
               </p>
             </div>
+          ) : pending && transaction.checkoutUrl && transaction.checkoutPageMode === "popup" ? (
+            <div className="checkout-page-continue">
+              <p>
+                Complete the payment in the secure checkout popup. The order is
+                fulfilled only after this server verifies the session fields.
+              </p>
+              {error && (
+                <p className="error-message" role="alert">{error}</p>
+              )}
+            </div>
           ) : checkoutPageEmbedded ? (
             <div className="checkout-page-frame">
               <iframe
@@ -907,7 +939,7 @@ function CheckoutDialog({
               )}
             </div>
           )}
-          {pending && transaction.checkoutPageMode !== "redirect" && (
+          {pending && transaction.checkoutPageMode !== "redirect" && transaction.checkoutPageMode !== "popup" && (
             <div className="qr-actions">
               <Countdown expiresAt={transaction.expiresAt} />
               {!checkoutPageEmbedded && (
@@ -1113,23 +1145,23 @@ function ApiGuide() {
             <div className="section-label">
               <ExternalLink size={17} /> CHECKOUT PAGE
             </div>
-            <h3>One switch, two presentation modes.</h3>
+            <h3>One switch, three presentation modes.</h3>
             <p>
-              Settings can route checkout through the hosted Bakong page, either
-              embedded or full page. The store mints{" "}
-              <code>POST /v1/checkout/sessions</code> server side with the
-              merchant token and a UUID <code>Idempotency-Key</code>, then
-              returns <code>checkout_url</code>, <code>session_id</code>, and{" "}
-              <code>md5</code> to persist with the order.
+              Settings can route checkout through the hosted Bakong page as an
+              embedded iframe, a full-page redirect, or the checkout.js popup.
+              The store mints <code>POST /v1/checkout/sessions</code> server
+              side with the merchant token, a UUID{" "}
+              <code>Idempotency-Key</code>, and the success/cancel URLs, then
+              returns only the <code>checkout_url</code> to the browser.
             </p>
             <h3>The page never fulfils.</h3>
             <p>
-              In embedded mode the page reports{" "}
-              <code>PAYMENT_SUCCESS</code> through a validated{" "}
-              <code>postMessage</code>; in full-page mode it returns to{" "}
-              <code>/checkout/return?bill=&#123;BILL_NO&#125;</code>. Both are
-              accelerators only: the backend listener confirms every payment and
-              only a verified SUCCESS settles the order.
+              The popup calls <code>onSuccess</code>, and the browser asks{" "}
+              <code>/api/v1/checkout/confirm</code> to re-read the session. The
+              server fulfils once, only after a verified{" "}
+              <code>SUCCESS</code> whose amount, currency, and billNo match the
+              order. Clicking the iframe or popup messages alone never marks an
+              order paid.
             </p>
             <a
               href="https://bakong.nbc.gov.kh/"
@@ -1196,6 +1228,7 @@ export default function Storefront() {
   const [history, setHistory] = useState<Transaction[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [popupOpen, setPopupOpen] = useState(false);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [searchLoading, setSearchLoading] = useState(false);
@@ -1231,7 +1264,11 @@ export default function Storefront() {
           try {
             if (localStorage.getItem(CHECKOUT_PAGE_STORAGE_KEY) === "true") setCheckoutPageEnabled(true);
             const savedPageMode = localStorage.getItem(CHECKOUT_PAGE_MODE_STORAGE_KEY);
-            if (savedPageMode === "iframe" || savedPageMode === "redirect") setCheckoutPageMode(savedPageMode);
+            if (savedPageMode === "iframe" || savedPageMode === "redirect" || savedPageMode === "popup") {
+              if (savedPageMode !== "popup" || result.checkoutPage.popupAvailable) setCheckoutPageMode(savedPageMode);
+            } else if (result.checkoutPage.popupAvailable) {
+              setCheckoutPageMode("popup");
+            }
           } catch {
             /* Use the server default when browser storage is unavailable. */
           }
@@ -1419,6 +1456,74 @@ export default function Storefront() {
   }
 
   const checkoutPageAvailable = health?.checkoutPage?.available ?? false;
+
+  // checkout.js only prompts us; this server round-trip is what actually
+  // verifies and settles the order. Repeat while the trusted status is PENDING.
+  const confirmOnServer = useCallback(async (sessionId: string) => {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        const result = await requestApi<{
+          data: Transaction | null;
+          session_status: string;
+        }>("/api/v1/checkout/confirm", {
+          ...post({ sessionId }),
+          signal: AbortSignal.timeout(70_000),
+        });
+        if (result.data) {
+          updateTransaction(result.data);
+          if (result.data.status !== "pending") {
+            setTransaction(result.data);
+            setCheckoutError("");
+            setError("");
+            return result.data;
+          }
+        }
+        if (result.session_status !== "PENDING") return result.data;
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Could not confirm the payment.";
+        setCheckoutError(message);
+        setError(message);
+        return null;
+      }
+    }
+    const message = "The payment is still pending. Check Transactions in a moment.";
+    setCheckoutError(message);
+    setError(message);
+    return null;
+  }, [updateTransaction]);
+
+  const openCheckoutPopup = useCallback(async (data: Transaction) => {
+    if (!data.checkoutUrl) throw new Error("The checkout page URL is missing.");
+    setPopupOpen(true);
+    setCheckoutError("");
+    try {
+      await waitForBakongCheckout();
+      openBakongCheckout(data.checkoutUrl, {
+        onSuccess: (event) => {
+          if (event.sessionId) void confirmOnServer(event.sessionId);
+          else setError("The checkout succeeded but did not return a session id. Check Transactions.");
+        },
+        onScanned: () => setCheckoutError(""),
+        onExpired: () =>
+          setCheckoutError("The checkout session expired. Create a new checkout to try again."),
+        onClose: (event) => {
+          setPopupOpen(false);
+          if (event.paid) {
+            if (event.sessionId) void confirmOnServer(event.sessionId);
+            return;
+          }
+          setTransaction(data);
+          updateTransaction(data);
+          setCheckoutError("Checkout closed before payment completed.");
+        },
+      });
+    } catch (error) {
+      setPopupOpen(false);
+      throw error;
+    }
+  }, [confirmOnServer, updateTransaction]);
+
   async function checkout() {
     setCheckoutLoading(true);
     setError("");
@@ -1437,10 +1542,14 @@ export default function Storefront() {
       );
       const data = result.data;
       checkoutMd5.current = data.md5;
-      setTransaction(data);
-      updateTransaction(data);
       setSimulateQueued(false);
       setCheckoutError("");
+      if (data.checkoutUrl && data.checkoutPageMode === "popup") {
+        await openCheckoutPopup(data);
+        return;
+      }
+      setTransaction(data);
+      updateTransaction(data);
       if (data.checkoutUrl && data.checkoutPageMode === "redirect") {
         window.location.assign(data.checkoutUrl);
       }
@@ -1909,26 +2018,31 @@ export default function Storefront() {
                     disabled={
                       !cart.length ||
                       checkoutLoading ||
+                      popupOpen ||
                       healthError ||
                       !health ||
                       catalogLoading ||
                       !!catalogError
                     }
                   >
-                    {checkoutLoading ? (
+                    {checkoutLoading || popupOpen ? (
                       <LoaderCircle className="spin" size={17} />
                     ) : checkoutPageEnabled && checkoutPageAvailable ? (
                       <ExternalLink size={18} />
                     ) : (
                       <QrCode size={18} />
                     )}
-                    {checkoutLoading
-                      ? "Opening your checkout…"
-                      : checkoutPageEnabled && checkoutPageAvailable
-                        ? checkoutPageMode === "iframe"
-                          ? "Checkout with the page"
-                          : "Checkout on the page"
-                        : "Checkout with KHQR"}
+                    {popupOpen
+                      ? "Complete payment in checkout…"
+                      : checkoutLoading
+                        ? "Opening your checkout…"
+                        : checkoutPageEnabled && checkoutPageAvailable
+                          ? checkoutPageMode === "popup"
+                            ? "Checkout in the popup"
+                            : checkoutPageMode === "iframe"
+                              ? "Checkout with the page"
+                              : "Checkout on the page"
+                          : "Checkout with KHQR"}
                     <ArrowRight size={16} />
                   </button>
                   <div className="checkout-reassurance">
@@ -2154,6 +2268,7 @@ export default function Storefront() {
           checkoutPageEnabled={checkoutPageEnabled}
           checkoutPageMode={checkoutPageMode}
           checkoutPageAvailable={checkoutPageAvailable}
+          checkoutPagePopupAvailable={health?.checkoutPage?.popupAvailable ?? false}
           checkoutPageProvider={health?.checkoutPage?.provider ?? "mock"}
           webhookAvailable={health?.methods.includes("webhook") ?? false}
           pollingAvailable={health?.methods.includes("polling") ?? false}

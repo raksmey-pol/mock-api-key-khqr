@@ -21,7 +21,7 @@ export const checkoutSchema = z.object({
   webhookSignatureMode: z.enum(["signed", "token", "unsigned"]).optional(),
   expectedAmount: z.number().positive().optional(),
   checkoutPage: z.boolean().default(false),
-  checkoutPageMode: z.enum(["iframe", "redirect"]).default("iframe"),
+  checkoutPageMode: z.enum(["iframe", "redirect", "popup"]).default("iframe"),
 }).strict();
 
 export async function createTransaction(body: unknown, options: { origin: string } = { origin: "http://localhost" }) {

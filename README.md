@@ -82,8 +82,10 @@ Copy `.env.example` to `.env.local` and restart the server after changing config
 | `KHQR_ACQUIRING_BANK`     | Required when a merchant ID is supplied                                                                                                                   |
 | `WEBHOOK_SECRET`          | HMAC-SHA256 signing key; required for signed callbacks, optional for unsigned callbacks                                                                   |
 | `WEBHOOK_SIGNATURE_MODE`  | Default for new orders: `signed`, `token`, or `unsigned`. If empty, defaults to signed when a key is set, otherwise unsigned. Signed/token require a key. |
-| `BAKONG_MERCHANT_TOKEN`   | Merchant bearer token for the Bakong checkout page; set together with `BAKONG_CHECKOUT_API_URL` to enable the checkout page                                |
-| `BAKONG_CHECKOUT_API_URL` | Checkout page Open API base URL **without** `/v1` (for example `https://checkout.bakong.nbc.gov.kh`); enabling both also enables the merchant endpoints    |
+| `BAKONG_MERCHANT_TOKEN`   | Merchant bearer token for the Bakong checkout page; set together with `OPEN_API_BASE` to enable the checkout page                                |
+| `OPEN_API_BASE` | Checkout gateway Open API base URL **without** `/v1` (for example `http://localhost:3000`); enabling it with the merchant token also enables the merchant endpoints |
+| `CHECKOUT_HOST` | Origin that serves `checkout.js` and the hosted page (for example `http://localhost:8788`); required for popup mode |
+| `BAKONG_CHECKOUT_API_URL` | Legacy alias for `OPEN_API_BASE`; `OPEN_API_BASE` takes precedence |
 
 ### Connect the hosted checkout page
 
@@ -102,6 +104,12 @@ Store settings route enquiry through the hosted Bakong checkout page instead of 
 3. Setting one variable without the other is a configuration error; checkout, the health check, and the merchant endpoints surface it as a 503. The page switch stores your last choice in the browser and only appears when the provider is configured.
 
 In full-page mode the page returns to the store's `/checkout/return` route with `{BILL_NO}` replaced by the order number; that route searches the store's cached order by bill number and never fulfils from unpacked query parameters.
+
+### checkout.js popup
+
+Set `CHECKOUT_HOST` to the origin that serves `checkout.js` (and `OPEN_API_BASE` plus `BAKONG_MERCHANT_TOKEN` to the checkout gateway). The layout loads `${CHECKOUT_HOST}/checkout.js` on page load. Choose **Checkout page → Popup** in settings.
+
+On **Pay**, the server creates the order, mints a session with the success and cancel URLs, stores `session_id`, and returns only `checkout_url` to the browser. The browser calls `BakongCheckout.open(checkout_url, { onSuccess })`; `onSuccess` posts the session id to `/api/v1/checkout/confirm`. That endpoint repeats `GET /v1/checkout/sessions/{session_id}?wait=true&w=60` while the status is `PENDING` and fulfils once only for a verified `SUCCESS` whose amount, currency, and billNo match the stored order. Closing the popup unpaid uses `cancelUrl` unless an `onClose` handler is supplied. The merchant token never reaches the browser, and the CSP allows `CHECKOUT_HOST` in `script-src` and `frame-src`.
 
 ### Merchant checkout-page endpoints
 

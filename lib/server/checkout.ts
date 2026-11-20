@@ -21,6 +21,7 @@ import {
   readCheckoutSessionByMd5,
   readCheckoutSessionByToken,
   readTransaction,
+  readTransactionByCheckoutSessionId,
   recordCheckoutIdempotency,
   updateCheckoutSession,
   updateTransaction,
@@ -173,6 +174,15 @@ export function merchantSessionView(session: CheckoutSession) {
     payment_at: session.paymentAt,
     expiry: session.expiry,
   };
+}
+
+// The popup flow stores session_id server-side and sends only checkout_url to
+// the browser. Other presentation modes keep the existing storefront payload.
+export function browserTransaction(transaction: Transaction): Transaction {
+  if (transaction.checkoutPageMode !== "popup") return transaction;
+  const { checkoutSessionId, ...rest } = transaction;
+  void checkoutSessionId;
+  return rest;
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +400,7 @@ export function checkoutUrlForSession(session: CheckoutSession, origin: string) 
 // ---------------------------------------------------------------------------
 
 const SUCCESS_URL_TEMPLATE = "/checkout/return?bill={BILL_NO}";
+const CANCEL_URL_TEMPLATE = "/checkout/return?bill={BILL_NO}&status=CANCELLED";
 
 // Persist session_id, checkout_url, and the presentation mode on the order
 // before the checkout view renders (integration guide 5.2), then hand the
@@ -398,15 +409,19 @@ export async function attachCheckoutSession(transaction: Transaction, options: {
   origin: string;
   pageMode: CheckoutPageMode;
 }): Promise<Transaction> {
+  if (transaction.checkoutSessionId && transaction.checkoutUrl) return transaction;
   const config = getConfig();
   const expirySeconds = config.expirationMinutes * 60;
-  const successUrl = `${options.origin.replace(/\/$/, "")}${SUCCESS_URL_TEMPLATE}`;
+  const origin = options.origin.replace(/\/$/, "");
+  const successUrl = `${origin}${SUCCESS_URL_TEMPLATE}`;
+  const cancelUrl = `${origin}${CANCEL_URL_TEMPLATE}`;
   if (config.checkoutProvider === "bakong") {
     const remote = await mintRemoteCheckoutSession({
       amount: transaction.amount,
       currency: transaction.currency,
       billNo: transaction.orderNumber,
       successUrl,
+      cancelUrl,
       expirySeconds,
       description: `Mekong Store order ${transaction.orderNumber}`,
     });
@@ -599,7 +614,7 @@ const remoteMintData = z.object({
 function checkoutApiConfig() {
   const config = getConfig();
   if (config.checkoutProvider !== "bakong" || !config.bakongMerchantToken || !config.bakongCheckoutApiUrl) {
-    throw new ApiError(503, "BAKONG_MERCHANT_TOKEN and BAKONG_CHECKOUT_API_URL are required for the real checkout page.");
+    throw new ApiError(503, "OPEN_API_BASE and BAKONG_MERCHANT_TOKEN are required for the real checkout page.");
   }
   return { base: config.bakongCheckoutApiUrl.replace(/\/$/, ""), token: config.bakongMerchantToken };
 }
@@ -613,10 +628,20 @@ export async function mintRemoteCheckoutSession(input: {
   currency: Currency;
   billNo: string;
   successUrl: string;
+  cancelUrl?: string;
   expirySeconds: number;
   description?: string;
 }): Promise<RemoteCheckoutSession> {
   const { base, token } = checkoutApiConfig();
+  const payload = {
+    amount: input.amount,
+    currency: input.currency,
+    billNo: input.billNo,
+    ...(input.description ? { description: input.description } : {}),
+    successUrl: input.successUrl,
+    ...(input.cancelUrl ? { cancelUrl: input.cancelUrl } : {}),
+    expirySeconds: input.expirySeconds,
+  };
   let response: Response;
   try {
     response = await fetch(`${base}/v1/checkout/sessions`, {
@@ -624,9 +649,10 @@ export async function mintRemoteCheckoutSession(input: {
       headers: {
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
+        // One key per order attempt; retries of this exact call replay it.
         "idempotency-key": randomUUID(),
       },
-      body: JSON.stringify(input),
+      body: JSON.stringify(payload),
       cache: "no-store",
       signal: AbortSignal.timeout(10_000),
     });
@@ -637,6 +663,9 @@ export async function mintRemoteCheckoutSession(input: {
   try { body = await response.json(); } catch { throw new ApiError(502, "The Bakong checkout Open API returned a non-JSON response."); }
   if (!response.ok) {
     const message = (body as StatusEnvelope)?.status?.message ?? `HTTP ${response.status}`;
+    if (response.status === 409) {
+      throw new ApiError(409, `This billNo already has an open checkout at a different amount. Cancel it or use a new billNo.${message ? ` (${message})` : ""}`);
+    }
     throw new ApiError(502, `The Bakong checkout Open API rejected the session: ${message}`);
   }
   const data = remoteMintData.safeParse((body as { data?: unknown }).data);
@@ -647,14 +676,39 @@ export async function mintRemoteCheckoutSession(input: {
 const remoteReadData = z.object({
   session_id: z.string().min(1),
   status: z.string().min(1),
-  md5: z.string().min(1),
-  billNo: z.string().min(1),
-  amount: z.number().positive(),
-  currency: z.enum(["USD", "KHR"]),
+  md5: z.string().min(1).optional(),
+  billNo: z.string().min(1).optional(),
+  amount: z.number().positive().optional(),
+  currency: z.enum(["USD", "KHR"]).optional(),
   payment_at: z.number().optional(),
 }).passthrough();
 
-export type RemoteReadResult = z.infer<typeof remoteReadData>;
+// A long-poll at the window boundary returns only { session_id, status:
+// "PENDING" }. Terminal responses carry the full session and are the only ones
+// allowed to settle an order.
+export type RemoteReadResult = {
+  session_id: string;
+  status: string;
+  md5?: string;
+  billNo?: string;
+  amount?: number;
+  currency?: Currency;
+  payment_at?: number;
+};
+
+export type RemoteTerminalSession = RemoteReadResult & {
+  md5: string;
+  billNo: string;
+  amount: number;
+  currency: Currency;
+};
+
+export function requireRemoteTerminalFields(session: RemoteReadResult): RemoteTerminalSession {
+  if (!session.md5 || !session.billNo || session.amount === undefined || !session.currency) {
+    throw new ApiError(502, "The Bakong checkout Open API returned an incomplete terminal session payload.");
+  }
+  return session as RemoteTerminalSession;
+}
 
 export async function readRemoteCheckoutSession(sessionId: string, window = 90): Promise<RemoteReadResult> {
   const { base, token } = checkoutApiConfig();
@@ -682,6 +736,58 @@ export async function readRemoteCheckoutSession(sessionId: string, window = 90):
 
 export const REMOTE_TERMINAL = new Set(["SUCCESS", "FAILED", "TIMEOUT", "EXPIRED", "CANCELLED"]);
 
+// Browser-triggered confirmation. The browser only supplies the session id it
+// received from checkout.js; the server re-reads the trusted session, verifies
+// amount/currency/billNo against the stored order, and settles exactly once.
+export async function confirmRemoteCheckoutSession(sessionId: string, window = 60): Promise<{
+  status: string;
+  transaction: Transaction | null;
+}> {
+  const transaction = readTransactionByCheckoutSessionId(sessionId);
+  if (!transaction) throw new ApiError(404, "No order is linked to this checkout session.");
+  if (transaction.status !== "pending") {
+    return {
+      status: transaction.status === "paid" ? "SUCCESS" : transaction.status.toUpperCase(),
+      transaction,
+    };
+  }
+  if (!isRealCheckoutProvider()) {
+    const session = readCheckoutSession(sessionId) ?? readCheckoutSessionByMd5(transaction.md5);
+    if (session) syncCheckoutSession(session);
+    const { pollTransaction } = await import("./transactions");
+    const polled = await pollTransaction(transaction.md5);
+    return {
+      status: polled.status === "paid" ? "SUCCESS" : polled.status === "pending" ? "PENDING" : polled.status.toUpperCase(),
+      transaction: polled,
+    };
+  }
+  const remote = await readRemoteCheckoutSession(sessionId, window);
+  if (!REMOTE_TERMINAL.has(remote.status)) {
+    return { status: "PENDING", transaction };
+  }
+  const verified = requireRemoteTerminalFields(remote);
+  if (verified.session_id !== sessionId) {
+    throw new ApiError(409, "The checkout session does not match this order.");
+  }
+  if (verified.billNo !== transaction.orderNumber || verified.amount !== transaction.amount || verified.currency !== transaction.currency) {
+    updateTransaction(transaction.md5, (current) => addEvent(
+      current,
+      "system",
+      "The checkout session returned fields that do not match the order. Payment was not recorded.",
+    ));
+    throw new ApiError(409, "The checkout session fields do not match this order.");
+  }
+  const settled = updateTransaction(transaction.md5, (current) => applyRemoteResult(current, {
+    status: verified.status,
+    amount: verified.amount,
+    currency: verified.currency,
+    billNo: verified.billNo,
+    sessionId: verified.session_id,
+    paymentAt: verified.payment_at,
+  }));
+  return { status: verified.status, transaction: settled ?? transaction };
+}
+
 // Durable waiter for real sessions. The page is presentation only, so the
 // merchant backend keeps re-arming long polls until a terminal status (section
 // 7.1) and then performs the verified, idempotent settlement write (7.2).
@@ -693,13 +799,14 @@ export async function runCheckoutPageWaiter(parameters: { sessionId: string; md5
       await new Promise((resolve) => setTimeout(resolve, 250 + Math.floor(Math.random() * 500)));
       continue;
     }
+    const verified = requireRemoteTerminalFields(session);
     updateTransaction(parameters.md5, (transaction) => applyRemoteResult(transaction, {
-      status: session.status,
-      amount: session.amount,
-      currency: session.currency,
-      billNo: session.billNo,
-      sessionId: session.session_id,
-      paymentAt: session.payment_at,
+      status: verified.status,
+      amount: verified.amount,
+      currency: verified.currency,
+      billNo: verified.billNo,
+      sessionId: verified.session_id,
+      paymentAt: verified.payment_at,
     }));
     return;
   }

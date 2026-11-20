@@ -13,8 +13,18 @@ export async function GET() {
     // both real-provider environment variables are present the sessions are
     // minted through the configured Bakong checkout Open API instead.
     const checkoutPage = config.bakongMerchantToken && config.bakongCheckoutApiUrl
-      ? { available: true, provider: "bakong" as const }
-      : { available: true, provider: "mock" as const };
+      ? {
+          available: true,
+          provider: "bakong" as const,
+          checkoutHost: config.checkoutHost || null,
+          popupAvailable: Boolean(config.checkoutHost),
+        }
+      : {
+          available: true,
+          provider: "mock" as const,
+          checkoutHost: config.checkoutHost || null,
+          popupAvailable: false,
+        };
     return json({
       status: "ok", service: "mekong-khqr-store", timestamp: new Date().toISOString(),
       mode: config.mode, storage: "sqlite", merchantName: config.merchantName,

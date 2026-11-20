@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { ProviderResult, Transaction } from "../types";
-import { readRemoteCheckoutSession } from "./checkout";
+import { readRemoteCheckoutSession, requireRemoteTerminalFields } from "./checkout";
 import { getConfig } from "./config";
 import { ApiError } from "./http";
 import { readMockPayment } from "./store";
@@ -45,18 +45,28 @@ export async function checkProvider(transaction: Transaction): Promise<ProviderR
   // locally generated string. The server-side waiter covers webhook orders.
   if (transaction.checkoutSessionId && config.checkoutProvider === "bakong") {
     const remote = await readRemoteCheckoutSession(transaction.checkoutSessionId, 10);
-    if (remote.billNo !== transaction.orderNumber || remote.amount !== transaction.amount || remote.currency !== transaction.currency) {
+    // A long-poll that ends at its window may return only { session_id,
+    // status: "PENDING" }; verify fields whenever the provider returned them.
+    if (
+      remote.billNo !== undefined &&
+      remote.amount !== undefined &&
+      remote.currency !== undefined &&
+      (remote.billNo !== transaction.orderNumber ||
+        remote.amount !== transaction.amount ||
+        remote.currency !== transaction.currency)
+    ) {
       throw new ApiError(409, "The checkout page session returned fields that do not match the order.");
     }
     // Endpoint 6 belongs to the session, not the local MD5, so a SUCCESS maps
     // to a full receipt the storefront's single write path records it with.
     if (remote.status === "SUCCESS") {
+      const verified = requireRemoteTerminalFields(remote);
       return {
         status: "paid",
-        amount: remote.amount,
-        currency: remote.currency,
+        amount: verified.amount,
+        currency: verified.currency,
         toAccountId: transaction.accountId,
-        transactionId: remote.session_id,
+        transactionId: verified.session_id,
       };
     }
     if (remote.status === "FAILED" || remote.status === "TIMEOUT" || remote.status === "CANCELLED") {

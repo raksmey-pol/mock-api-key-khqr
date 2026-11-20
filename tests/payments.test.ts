@@ -15,6 +15,7 @@ import { POST as simulate } from "../app/api/v1/transactions/simulate/route";
 import { GET as catalog } from "../app/api/v1/products/route";
 import { PATCH as editProduct } from "../app/api/v1/products/[productId]/route";
 import { parseBakongResponse } from "../lib/server/bakong";
+import { confirmRemoteCheckoutSession } from "../lib/server/checkout";
 import { database, readTransaction, updateTransaction } from "../lib/server/store";
 import type { Product, Transaction, WebhookSignatureMode } from "../lib/types";
 
@@ -939,6 +940,21 @@ test("the page payment endpoint advances settled mock payments for the full-page
   assert.equal(readTransaction(transaction.md5)?.status, "paid");
 });
 
+test("popup checkout returns only the checkout URL to the browser", async () => {
+  const response = await create(request("/api/v1/transactions", {
+    items: [{ productId: "daily-notes", quantity: 1 }],
+    currency: "USD", method: "polling",
+    checkoutPage: true,
+    checkoutPageMode: "popup",
+  }));
+  assert.equal(response.status, 201);
+  const transaction = (await (await response.json()) as { data: Transaction }).data;
+  assert.equal(transaction.checkoutPageMode, "popup");
+  assert.ok(transaction.checkoutUrl);
+  assert.equal(transaction.checkoutSessionId, undefined, "session_id stays server-side");
+  assert.equal(readTransaction(transaction.md5)?.checkoutSessionId?.length, 36);
+});
+
 test("cancel frees a pending page session and its storefront order once", async () => {
   const response = await create(request("/api/v1/transactions", {
     items: [{ productId: "everyday-cup", quantity: 1 }],
@@ -959,6 +975,69 @@ test("cancel frees a pending page session and its storefront order once", async 
 
   const repeat = await cancelSession(merchantPost(`/api/v1/checkout/sessions/${sessionId}/cancel`, {}, { authorization: `Bearer ${DEMO.MERCHANT_TOKEN}` }), { params: Promise.resolve({ sessionId }) });
   assert.equal(repeat.status, 409);
+});
+
+test("popup confirmation repeats PENDING and settles a verified SUCCESS once", async () => {
+  const transaction = await order("polling", "USD");
+  const sessionId = randomUUID();
+  updateTransaction(transaction.md5, (current) => ({
+    ...current,
+    checkoutPageMode: "popup",
+    checkoutSessionId: sessionId,
+    checkoutUrl: "http://localhost:8788/c/popup-token",
+  }));
+
+  const originalFetch = globalThis.fetch;
+  const originalToken = process.env.BAKONG_MERCHANT_TOKEN;
+  const originalBase = process.env.OPEN_API_BASE;
+  process.env.BAKONG_MERCHANT_TOKEN = "mbk.popup-test";
+  process.env.OPEN_API_BASE = "https://gateway.test";
+  let reads = 0;
+  try {
+    globalThis.fetch = async (url) => {
+      const href = String(url);
+      if (!href.includes(`/v1/checkout/sessions/${sessionId}`)) {
+        throw new Error(`Unexpected fetch: ${href}`);
+      }
+      reads++;
+      if (reads === 1) {
+        return Response.json({
+          status: { code: "00", message: "Success" },
+          data: { session_id: sessionId, status: "PENDING" },
+        });
+      }
+      return Response.json({
+        status: { code: "00", message: "Success" },
+        data: {
+          session_id: sessionId,
+          status: "SUCCESS",
+          md5: transaction.md5,
+          billNo: transaction.orderNumber,
+          amount: transaction.amount,
+          currency: transaction.currency,
+          payment_at: Math.floor(Date.now() / 1000),
+        },
+      });
+    };
+
+    const pending = await confirmRemoteCheckoutSession(sessionId, 1);
+    assert.equal(pending.status, "PENDING");
+    assert.equal(readTransaction(transaction.md5)?.status, "pending");
+
+    const settled = await confirmRemoteCheckoutSession(sessionId, 1);
+    assert.equal(settled.status, "SUCCESS");
+    assert.equal(readTransaction(transaction.md5)?.status, "paid");
+
+    const replay = await confirmRemoteCheckoutSession(sessionId, 1);
+    assert.equal(replay.status, "SUCCESS");
+    assert.equal(reads, 2, "a settled order must not be fulfilled again");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) delete process.env.BAKONG_MERCHANT_TOKEN;
+    else process.env.BAKONG_MERCHANT_TOKEN = originalToken;
+    if (originalBase === undefined) delete process.env.OPEN_API_BASE;
+    else process.env.OPEN_API_BASE = originalBase;
+  }
 });
 
 test("session reads validate the wait window", async () => {

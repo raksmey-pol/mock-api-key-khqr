@@ -16,6 +16,7 @@ const configSchema = z.object({
   expirationMinutes: z.coerce.number().int().min(1).max(10),
   bakongMerchantToken: z.string().max(128),
   bakongCheckoutApiUrl: z.string().max(256),
+  checkoutHost: z.string().max(256),
 });
 
 const DEMO_MERCHANT_TOKEN = "mbk.mekong-mock-merchant";
@@ -35,17 +36,24 @@ export function getConfig() {
     webhookSignatureMode: process.env.WEBHOOK_SIGNATURE_MODE || (process.env.WEBHOOK_SECRET ? "signed" : "unsigned"),
     expirationMinutes: process.env.KHQR_EXPIRATION_MINUTES ?? 5,
     bakongMerchantToken: process.env.BAKONG_MERCHANT_TOKEN ?? "",
-    bakongCheckoutApiUrl: process.env.BAKONG_CHECKOUT_API_URL ?? "",
+    // OPEN_API_BASE is the gateway Open API base (no /v1). The older
+    // BAKONG_CHECKOUT_API_URL name remains supported for existing installs.
+    bakongCheckoutApiUrl: process.env.OPEN_API_BASE || process.env.BAKONG_CHECKOUT_API_URL || "",
+    // CHECKOUT_HOST serves checkout.js and the hosted checkout page.
+    checkoutHost: process.env.CHECKOUT_HOST || "",
   });
   if (config.merchantId && !config.acquiringBank) throw new ApiError(503, "KHQR_ACQUIRING_BANK is required with a merchant ID.");
   if (config.webhookSignatureMode !== "unsigned" && !config.webhookSecret) {
     throw new ApiError(503, "WEBHOOK_SECRET is required for signed or token webhook authentication.");
   }
   if (Boolean(config.bakongMerchantToken) !== Boolean(config.bakongCheckoutApiUrl)) {
-    throw new ApiError(503, "BAKONG_CHECKOUT_API_URL and BAKONG_MERCHANT_TOKEN must be configured together for the real checkout page.");
+    throw new ApiError(503, "OPEN_API_BASE and BAKONG_MERCHANT_TOKEN must be configured together for the real checkout page.");
   }
   if (config.bakongCheckoutApiUrl && !URL.canParse(config.bakongCheckoutApiUrl)) {
-    throw new ApiError(503, "BAKONG_CHECKOUT_API_URL must be a valid URL.");
+    throw new ApiError(503, "OPEN_API_BASE must be a valid URL.");
+  }
+  if (config.checkoutHost && !URL.canParse(config.checkoutHost)) {
+    throw new ApiError(503, "CHECKOUT_HOST must be a valid URL.");
   }
   return { ...config, checkoutProvider: checkoutProvider(config) };
 }

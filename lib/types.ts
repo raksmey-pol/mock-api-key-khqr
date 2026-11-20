@@ -6,7 +6,7 @@ export type PaymentStatus = "pending" | "paid" | "failed" | "expired";
 
 // Presentation of the checkout: the inline QR card or the hosted Bakong
 // checkout page (embedded in an iframe or as a full-page redirect).
-export type CheckoutPageMode = "iframe" | "redirect";
+export type CheckoutPageMode = "iframe" | "redirect" | "popup";
 export type CheckoutProvider = "mock" | "bakong";
 // Session statuses follow the hosted checkout page's forward-only state machine.
 export type CheckoutSessionStatus =
@@ -139,6 +139,8 @@ export type Health = {
   checkoutPage: {
     available: boolean;
     provider: CheckoutProvider;
+    checkoutHost?: string | null;
+    popupAvailable?: boolean;
     configError?: string;
   };
 };

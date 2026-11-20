@@ -2,7 +2,7 @@ import { getConfig } from "@/lib/server/config";
 import { apiError, json, readJson, requestOrigin } from "@/lib/server/http";
 import { recentTransactions } from "@/lib/server/store";
 import { createTransaction, getTransaction } from "@/lib/server/transactions";
-import { isRealCheckoutProvider, runCheckoutPageWaiter } from "@/lib/server/checkout";
+import { isRealCheckoutProvider, browserTransaction, runCheckoutPageWaiter } from "@/lib/server/checkout";
 import { after } from "next/server";
 
 export const runtime = "nodejs";
@@ -22,7 +22,7 @@ export async function POST(request: Request) {
         console.warn("KHQR_CHECKOUT_WAITER", "Could not schedule the checkout page waiter for this session.");
       }
     }
-    return json({ data: transaction }, 201);
+    return json({ data: browserTransaction(transaction) }, 201);
   } catch (error) { return apiError(error); }
 }
 
@@ -30,7 +30,7 @@ export async function GET() {
   try {
     const config = getConfig();
     const data = recentTransactions(config.mode)
-      .map((transaction) => getTransaction(transaction.md5));
+      .map((transaction) => browserTransaction(getTransaction(transaction.md5)));
     return json({ data });
   } catch (error) { return apiError(error); }
 }

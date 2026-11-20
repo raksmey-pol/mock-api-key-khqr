@@ -102,6 +102,11 @@ export function readTransaction(md5: string): Transaction | null {
   return row ? JSON.parse(row.body as string) as Transaction : null;
 }
 
+export function readTransactionByCheckoutSessionId(sessionId: string): Transaction | null {
+  const row = database().prepare("SELECT body FROM transactions WHERE json_extract(body, '$.checkoutSessionId') = ? ORDER BY created_at DESC LIMIT 1").get(sessionId);
+  return row ? JSON.parse(row.body as string) as Transaction : null;
+}
+
 // Keep read/modify/write atomic across both callback and polling requests.
 export function updateTransaction(md5: string, update: (transaction: Transaction) => Transaction) {
   const db = database();

@@ -1,4 +1,5 @@
 import { apiError } from "@/lib/server/http";
+import { browserTransaction } from "@/lib/server/checkout";
 import { getTransaction, md5Schema } from "@/lib/server/transactions";
 
 export const runtime = "nodejs";
@@ -33,7 +34,7 @@ export async function GET(request: Request) {
             const transaction = getTransaction(md5);
             const version = `${transaction.updatedAt}:${transaction.status}`;
             if (lastVersion !== version) {
-              controller.enqueue(encoder.encode(`event: transaction\ndata: ${JSON.stringify(transaction)}\n\n`));
+              controller.enqueue(encoder.encode(`event: transaction\ndata: ${JSON.stringify(browserTransaction(transaction))}\n\n`));
               lastVersion = version;
             }
             if (transaction.status !== "pending") return stop();
